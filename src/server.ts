@@ -12,6 +12,11 @@ import { derivePublicJwk } from './publicKeyInfo';
 import { getAgentStoppedState } from './agentState';
 
 const app = express();
+// Render (and most PaaS hosts) terminate TLS at a proxy and forward plain HTTP
+// internally. Without this, Express sees every request as insecure, so
+// express-session refuses to set the session cookie when cookie.secure is
+// true — breaking the oauthState round-trip between /login and /callback.
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(
   session({
