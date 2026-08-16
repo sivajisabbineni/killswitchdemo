@@ -1,0 +1,49 @@
+import crypto from 'node:crypto';
+
+export interface CallLogEntry {
+  id: string;
+  timestamp: string;
+  label: string;
+  method: string;
+  url: string;
+  requestHeaders?: Record<string, string>;
+  requestBody?: string;
+  status?: number;
+  responseHeaders?: Record<string, string>;
+  responseBody?: string;
+  error?: string;
+}
+
+export interface TokenEntry {
+  id: string;
+  timestamp: string;
+  label: string;
+  token: string;
+  claims?: Record<string, unknown>;
+}
+
+const MAX_ENTRIES = 100;
+const calls: CallLogEntry[] = [];
+const tokens: TokenEntry[] = [];
+
+export function recordCall(entry: Omit<CallLogEntry, 'id' | 'timestamp'>): void {
+  calls.unshift({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), ...entry });
+  calls.length = Math.min(calls.length, MAX_ENTRIES);
+}
+
+export function recordToken(label: string, token: string, claims?: Record<string, unknown>): void {
+  tokens.unshift({ id: crypto.randomUUID(), timestamp: new Date().toISOString(), label, token, claims });
+  tokens.length = Math.min(tokens.length, MAX_ENTRIES);
+}
+
+export function getCalls(): CallLogEntry[] {
+  return calls;
+}
+
+export function getLatestCallByLabel(label: string): CallLogEntry | undefined {
+  return calls.find((c) => c.label === label);
+}
+
+export function getTokens(): TokenEntry[] {
+  return tokens;
+}

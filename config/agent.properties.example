@@ -1,0 +1,50 @@
+# Copy to agent.properties (gitignored) for local runs, or set the same keys
+# as environment variables in the Render dashboard for deployment.
+
+PORT=3000
+
+# --- Okta org used for the initial user login (Authorization Code flow) ---
+OKTA_ORG_URL=https://your-org.oktapreview.com
+OKTA_LOGIN_AUTH_SERVER_ID=default
+
+# --- Requesting App (the Agent), as registered in Okta for XAA ---
+# NOT used for user login. Authenticates only via private_key_jwt when
+# requesting the ID-JAG on the logged-in user's behalf (step 2 of xaa.ts).
+AGENT_CLIENT_ID=
+# The `kid` of the public key registered against this app's JWKS in Okta —
+# must match exactly, or Okta rejects the client_assertion as invalid_client.
+AGENT_KEY_ID=
+# Private key (PKCS8 PEM) used to sign the client_assertion. Registered as this
+# app's public key/JWKS in Okta. Paste the PEM here, or use literal \n for
+# newlines if setting this as a single-line env var on Render.
+AGENT_PRIVATE_KEY_PEM=
+AGENT_REDIRECT_URI=http://localhost:3000/callback
+# RFC 8707 resource indicator sent on the login's authorize + token requests.
+# Becomes the `aud` claim of the user's access_token (e.g. https://chattestagent.com).
+LOGIN_RESOURCE=
+
+# --- Resource App: the app the user actually logs into ---
+# This client is used both for the user's initial login (client_secret_basic)
+# AND to authenticate when redeeming the ID-JAG for a final access token at
+# this same app's token endpoint (step 3 of xaa.ts) — it's the same app both
+# times, just two different grant types.
+RESOURCE_APP_CLIENT_ID=
+RESOURCE_APP_CLIENT_SECRET=
+# Custom authorization server ID for the resource app, used to build the `audience`
+# param of the ID-JAG request: {OKTA_ORG_URL}/oauth2/{RESOURCE_AUTH_SERVER_ID}
+RESOURCE_AUTH_SERVER_ID=default
+# Token endpoint where the ID-JAG is exchanged (jwt-bearer grant) for a real access token.
+RESOURCE_APP_TOKEN_ENDPOINT=https://your-org.oktapreview.com/oauth2/default/v1/token
+# No real backend yet? httpbingo.org (a more reliably-uptime httpbin clone)
+# echoes back whatever it receives, including the Authorization header — enough
+# to confirm the XAA token is being sent correctly. Swap in your real resource
+# app's API base URL once you have one.
+RESOURCE_API_BASE_URL=https://httpbingo.org
+XAA_SCOPE=api:access:read
+
+# --- App session + killswitch ---
+SESSION_SECRET=change-me
+KILLSWITCH_WEBHOOK_URL=https://your-killswitch-webhook.example.com
+# Called by "Reset Agent" / POST /admin/reset to re-activate the agent after a killswitch trip.
+KILLSWITCH_WEBHOOK_RESET_URL=https://your-activation-webhook.example.com
+ADMIN_TRIGGER_SECRET=change-me

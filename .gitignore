@@ -1,0 +1,7 @@
+node_modules/
+dist/
+config/agent.properties
+.env
+*.log
+.claude/
+.DS_Store

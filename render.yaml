@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: killswitch-agent
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: OKTA_ORG_URL
+        sync: false
+      - key: OKTA_LOGIN_AUTH_SERVER_ID
+        sync: false
+      - key: AGENT_CLIENT_ID
+        sync: false
+      - key: AGENT_KEY_ID
+        sync: false
+      - key: AGENT_REDIRECT_URI
+        sync: false
+      - key: AGENT_PRIVATE_KEY_PEM
+        sync: false
+      - key: LOGIN_RESOURCE
+        sync: false
+      - key: RESOURCE_AUTH_SERVER_ID
+        sync: false
+      - key: RESOURCE_APP_TOKEN_ENDPOINT
+        sync: false
+      - key: RESOURCE_APP_CLIENT_ID
+        sync: false
+      - key: RESOURCE_APP_CLIENT_SECRET
+        sync: false
+      - key: RESOURCE_API_BASE_URL
+        sync: false
+      - key: XAA_SCOPE
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: KILLSWITCH_WEBHOOK_URL
+        sync: false
+      - key: KILLSWITCH_WEBHOOK_RESET_URL
+        sync: false
+      - key: ADMIN_TRIGGER_SECRET
+        sync: false
