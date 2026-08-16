@@ -4,14 +4,6 @@ import { buildClientAssertion } from './clientAssertion';
 import { tracedFetch } from './tracedFetch';
 import { recordToken, recordCall } from './debugLog';
 
-interface CachedToken {
-  accessToken: string;
-  expiresAt: number;
-}
-
-// Keyed by the user's access_token so different logged-in users don't share tokens.
-const cache = new Map<string, CachedToken>();
-
 function safeDecode(token: string): Record<string, unknown> | undefined {
   try {
     return decodeJwt(token);
@@ -100,25 +92,13 @@ async function runXaaExchange(userAccessToken: string): Promise<{ accessToken: s
   return exchangeIdJagForAccessToken(idJag);
 }
 
-export async function getResourceAccessToken(userAccessToken: string): Promise<string> {
-  const cached = cache.get(userAccessToken);
-  if (cached && cached.expiresAt > Date.now() + 5000) {
-    return cached.accessToken;
-  }
-
-  const { accessToken, expiresIn } = await runXaaExchange(userAccessToken);
-  cache.set(userAccessToken, { accessToken, expiresAt: Date.now() + expiresIn * 1000 });
-  return accessToken;
-}
-
 /**
- * Forces a fresh run of the ID-JAG + resource-token exchange, bypassing the
- * cache, so testing the Agent's XAA login always re-exercises both hops
- * (and re-populates the /debug call log + token list) instead of silently
- * returning a cached result.
+ * Always runs a fresh ID-JAG + resource-token exchange against Okta — no
+ * caching. Every call is a live check of whether the Agent's XAA trust is
+ * still valid, so a killswitch that revoked it upstream shows up as a real
+ * rejection here instead of the app quietly reusing a still-valid token.
  */
 export async function testXaaLogin(userAccessToken: string): Promise<string> {
-  const { accessToken, expiresIn } = await runXaaExchange(userAccessToken);
-  cache.set(userAccessToken, { accessToken, expiresAt: Date.now() + expiresIn * 1000 });
+  const { accessToken } = await runXaaExchange(userAccessToken);
   return accessToken;
 }

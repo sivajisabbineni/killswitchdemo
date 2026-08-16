@@ -3,7 +3,7 @@ import express from 'express';
 import session from 'express-session';
 import { config } from './config';
 import { buildAuthorizeUrl, exchangeCodeForToken } from './oidc';
-import { getResourceAccessToken, testXaaLogin } from './xaa';
+import { testXaaLogin } from './xaa';
 import { callResourceApi } from './resourceClient';
 import { evaluate } from './policy';
 import { triggerKillswitch, triggerActivation } from './killswitch';
@@ -88,11 +88,10 @@ app.get('/xaa/public-key', (req, res) => {
 });
 
 app.post('/xaa/login', async (req, res) => {
-  const stopped = getAgentStoppedState();
-  if (stopped) {
-    return res.status(403).json({ error: 'agent_stopped', message: 'This agent has been stopped.', ...stopped });
-  }
-
+  // Deliberately no local "stopped" short-circuit here: this always attempts
+  // the real ID-JAG + resource-token exchange against Okta, so if the
+  // killswitch webhook actually revoked the Agent's trust upstream, that
+  // real rejection is what shows up in the timeline — not a locally faked one.
   const userAccessToken = req.session.userAccessToken;
   if (!userAccessToken) {
     return res.status(401).json({ error: 'not_logged_in' });
@@ -107,11 +106,6 @@ app.post('/xaa/login', async (req, res) => {
 });
 
 app.post('/agent/act', async (req, res) => {
-  const stopped = getAgentStoppedState();
-  if (stopped) {
-    return res.status(403).json({ error: 'agent_stopped', message: 'This agent has been stopped.', ...stopped });
-  }
-
   const userAccessToken = req.session.userAccessToken;
   if (!userAccessToken) {
     return res.status(401).json({ error: 'not_logged_in' });
@@ -128,7 +122,11 @@ app.post('/agent/act', async (req, res) => {
   }
 
   try {
-    const accessToken = await getResourceAccessToken(userAccessToken);
+    // No local "stopped" short-circuit, and no cached token reuse: every
+    // action re-runs the full XAA exchange fresh, so a killswitch that
+    // actually revoked the Agent at Okta shows up as a real rejection here
+    // instead of the app silently trusting a still-valid cached token.
+    const accessToken = await testXaaLogin(userAccessToken);
     const result = await callResourceApi(accessToken, matched, params);
     res.json({ result });
   } catch (err) {
