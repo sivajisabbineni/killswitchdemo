@@ -244,6 +244,44 @@ function labelTitle(label: string): string {
   return STEP_BY_LABEL.get(label)?.title ?? EXTRA_LABEL_TITLES[label] ?? label;
 }
 
+function buildResourceSummary(c: CallLogEntry): string | undefined {
+  if (c.label !== 'resource:api-call' || !c.responseBody) return undefined;
+  let path: string;
+  try {
+    path = new URL(c.url).pathname;
+  } catch {
+    return undefined;
+  }
+  try {
+    if (path === '/ip') {
+      return `Resource server sees the agent's IP as ${JSON.parse(c.responseBody).origin}`;
+    }
+    if (path === '/uuid') {
+      return `Generated UUID: ${JSON.parse(c.responseBody).uuid}`;
+    }
+    if (path === '/user-agent') {
+      return `User-Agent sent: ${JSON.parse(c.responseBody)['user-agent']}`;
+    }
+    if (path === '/headers') {
+      const count = Object.keys(JSON.parse(c.responseBody).headers || {}).length;
+      return `Read back ${count} request header${count === 1 ? '' : 's'}`;
+    }
+    if (path === '/get' || path.startsWith('/anything/')) {
+      const j = JSON.parse(c.responseBody);
+      return `Resource echoed the call back (origin ${j.origin})`;
+    }
+    if (path.startsWith('/delay/')) {
+      return `Waited ~${path.split('/')[2]}s, then responded normally`;
+    }
+    if (path.startsWith('/base64/')) {
+      return `Decoded to: "${c.responseBody}"`;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function buildFeedHtml(): string {
   const greeting = `<div class="bubble bubble-assistant">Hi! I'm the killswitch-agent test harness. Use the actions below to run allowed calls, test the XAA login, or trigger the killswitch — every hop shows up in the timeline on the right.</div>`;
   const calls = getCalls().slice().reverse();
@@ -253,8 +291,10 @@ function buildFeedHtml(): string {
       const badge = c.error ? 'network error' : c.status !== undefined ? String(c.status) : '';
       const step = STEP_BY_LABEL.get(c.label);
       const jumpAttr = step ? ` data-jump-step="${step.n}"` : '';
+      const summary = ok ? buildResourceSummary(c) : undefined;
       return `<div class="bubble bubble-assistant ${ok ? 'bubble-ok' : 'bubble-fail'}"${jumpAttr}>
         <strong>${escapeHtml(labelTitle(c.label))}</strong> <span class="badge ${ok ? 'badge-ok' : 'badge-fail'}">${escapeHtml(badge)}</span>
+        ${summary ? `<div style="margin-top:4px;">${escapeHtml(summary)}</div>` : ''}
         ${step ? `<span class="muted"> — click to view T${step.n}</span>` : ''}
         <div class="muted timestamp">${escapeHtml(c.timestamp)}</div>
       </div>`;
@@ -293,7 +333,10 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       </div>`;
 
   const actionPills = listAllowedActions()
-    .map((a) => `<button type="button" class="pill" data-action="${escapeHtml(a.name)}">${escapeHtml(a.name)}</button>`)
+    .map(
+      (a) =>
+        `<button type="button" class="pill" data-action="${escapeHtml(a.name)}" data-default-params="${escapeHtml(JSON.stringify(a.defaultParams || {}))}" title="${escapeHtml(a.description)}">${escapeHtml(a.name)}</button>`,
+    )
     .join('');
 
   return `<!DOCTYPE html>
@@ -491,7 +534,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         <button type="button" class="pill pill-danger" id="rogueBtn">⚠ Trigger Rogue Action</button>
       </div>
       <form class="chat-input-row" id="chatForm">
-        <input type="text" id="chatInput" placeholder='resource.get or resource.status {"code":"500"}' />
+        <input type="text" id="chatInput" placeholder='resource.get or resource.item {"id":"42"}' />
         <button type="submit" class="btn-primary">Send</button>
       </form>
     </aside>
@@ -606,7 +649,22 @@ export function renderDebugPage(opts: DebugPageOptions): string {
 
     document.querySelectorAll('.chat-suggestions .pill[data-action]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        postAgentAction(btn.getAttribute('data-action'), undefined);
+        var action = btn.getAttribute('data-action');
+        var defaultParams = {};
+        try {
+          defaultParams = JSON.parse(btn.getAttribute('data-default-params') || '{}');
+        } catch (e) {}
+        var hasParams = Object.keys(defaultParams).length > 0;
+        if (hasParams) {
+          // Guided input: prefill the editable defaults instead of firing
+          // blind, so it's obvious what's being sent and it's easy to tweak.
+          var input = document.getElementById('chatInput');
+          input.value = action + ' ' + JSON.stringify(defaultParams);
+          input.focus();
+          input.select();
+        } else {
+          postAgentAction(action, undefined);
+        }
       });
     });
 

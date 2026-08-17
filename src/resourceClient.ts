@@ -4,6 +4,7 @@ import { tracedFetch } from './tracedFetch';
 export interface ResourceAction {
   method: string;
   path: string;
+  defaultParams?: Record<string, string>;
 }
 
 export async function callResourceApi(
@@ -12,7 +13,8 @@ export async function callResourceApi(
   params: Record<string, unknown> = {},
 ): Promise<unknown> {
   let path = action.path;
-  for (const [key, value] of Object.entries(params)) {
+  const merged: Record<string, unknown> = { ...action.defaultParams, ...params };
+  for (const [key, value] of Object.entries(merged)) {
     path = path.replace(`:${key}`, encodeURIComponent(String(value)));
   }
 
