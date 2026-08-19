@@ -1,5 +1,5 @@
 import { decodeJwt } from 'jose';
-import { getCalls, getTokens, getLatestCallByLabel, type CallLogEntry } from './debugLog';
+import { getCalls, getTokens, type CallLogEntry, type TokenEntry } from './debugLog';
 import { listAllowedActions } from './policy';
 import type { StoppedState } from './agentState';
 
@@ -14,6 +14,7 @@ function escapeHtml(value: string): string {
 interface DebugPageOptions {
   adminKey: string;
   loggedIn: boolean;
+  loginFlow?: 'resource' | 'agent';
   error?: string;
   stopped: StoppedState | null;
 }
@@ -22,48 +23,57 @@ type StepStatus = 'pending' | 'success' | 'error';
 
 interface StepDef {
   n: number;
-  label: string;
+  labels: string[];
   title: string;
   subtitle: string;
   hint: string;
-  tokenLabel?: string;
+  // Keyed by which of `labels` actually fired, since the login step can
+  // produce a different token pair (access + ID token) per flow.
+  tokenLabelsByCallLabel?: Record<string, string[]>;
 }
 
 const STEPS: StepDef[] = [
   {
     n: 1,
-    label: 'login:token-exchange',
-    title: 'Access Token',
+    labels: ['login:token-exchange', 'agentlogin:token-exchange'],
+    title: 'ID & Access Tokens',
     subtitle: 'User → Okta (OIDC authorization code)',
-    hint: 'Standard OIDC login — the human user authenticates and the Resource App exchanges the authorization code for a user access_token.',
-    tokenLabel: 'user access_token (login)',
+    hint: 'Standard OIDC login — the human user authenticates, via either the Resource App (client_secret_basic) or the Agent app (private_key_jwt), and gets back a user access_token and ID token.',
+    tokenLabelsByCallLabel: {
+      'login:token-exchange': ['user access_token (login)', 'ID token (login)'],
+      'agentlogin:token-exchange': ['user access_token (agent login)', 'ID token (agent login)'],
+    },
   },
   {
     n: 2,
-    label: 'xaa:id-jag-request',
+    labels: ['xaa:id-jag-request'],
     title: 'Get ID-JAG',
     subtitle: 'Agent → Okta (org token endpoint)',
     hint: 'RFC 8693 token-exchange — the Agent trades the user access_token for an ID-JAG, authenticating itself with a private_key_jwt client_assertion.',
-    tokenLabel: 'ID-JAG',
+    tokenLabelsByCallLabel: { 'xaa:id-jag-request': ['ID-JAG'] },
   },
   {
     n: 3,
-    label: 'xaa:resource-token-exchange',
+    labels: ['xaa:resource-token-exchange'],
     title: 'Resource Access Token',
     subtitle: 'Agent → Resource App token endpoint',
     hint: 'RFC 7523 jwt-bearer exchange — the Agent redeems the ID-JAG at the resource app\'s own token endpoint for a resource-scoped access_token.',
-    tokenLabel: 'resource access_token',
+    tokenLabelsByCallLabel: { 'xaa:resource-token-exchange': ['resource access_token'] },
   },
   {
     n: 4,
-    label: 'resource:api-call',
+    labels: ['resource:api-call'],
     title: 'Agent Action',
     subtitle: 'Agent → Resource API',
     hint: 'The Agent calls the resource API using the resource access_token from step 3 (only if the requested action is on the policy allow-list).',
   },
 ];
 
-const STEP_BY_LABEL = new Map(STEPS.map((s) => [s.label, s]));
+const STEP_BY_LABEL = new Map(STEPS.flatMap((s) => s.labels.map((label) => [label, s] as const)));
+
+function getLatestCallForStep(step: StepDef): CallLogEntry | undefined {
+  return getCalls().find((c) => step.labels.includes(c.label));
+}
 
 const EXTRA_LABEL_TITLES: Record<string, string> = {
   'killswitch:webhook': 'Killswitch webhook (deactivation)',
@@ -161,7 +171,7 @@ function safeDecodeBearer(headers?: Record<string, string>): Record<string, unkn
 }
 
 function buildStepCard(step: StepDef): string {
-  const call = getLatestCallByLabel(step.label);
+  const call = getLatestCallForStep(step);
   const status = statusOf(call);
   const statusIcon = status === 'success' ? '✓' : status === 'error' ? '✕' : '○';
 
@@ -197,19 +207,31 @@ function buildStepCard(step: StepDef): string {
     ${call.responseBody ? `<div class="field-label">BODY</div>${formatBody(call.responseBody)}` : ''}
     ${call.error ? `<div class="banner banner-error" style="margin-top:8px;">${escapeHtml(call.error)}</div>` : ''}`;
 
-  const tokenEntry = step.tokenLabel ? getTokens().find((t) => t.label === step.tokenLabel) : undefined;
-  const bearerClaims = !tokenEntry ? safeDecodeBearer(call.requestHeaders) : undefined;
+  // Tokens are looked up by label with no direct link to a specific call, so
+  // only trust a match when this call actually succeeded — otherwise a failed
+  // retry would still show the token from an earlier successful attempt.
+  const tokenLabels = status === 'success' ? step.tokenLabelsByCallLabel?.[call.label] ?? [] : [];
+  const tokenEntries = tokenLabels
+    .map((label) => getTokens().find((t) => t.label === label))
+    .filter((t): t is TokenEntry => t !== undefined);
+  const bearerClaims = tokenEntries.length === 0 && status === 'success' ? safeDecodeBearer(call.requestHeaders) : undefined;
   let tokenTab: string;
-  if (tokenEntry) {
-    tokenTab = `
-      <div class="field-label">RAW TOKEN</div>
-      <pre class="code-dark">${escapeHtml(tokenEntry.token)}</pre>
-      ${tokenEntry.claims ? `<div class="field-label">DECODED CLAIMS</div><pre class="code-dark">${escapeHtml(JSON.stringify(tokenEntry.claims, null, 2))}</pre>` : ''}`;
+  if (tokenEntries.length > 0) {
+    tokenTab = tokenEntries
+      .map(
+        (t) => `
+      <div class="field-label">${escapeHtml(t.label.toUpperCase())}</div>
+      <pre class="code-dark">${escapeHtml(t.token)}</pre>
+      ${t.claims ? `<pre class="code-dark" style="margin-top:6px;">${escapeHtml(JSON.stringify(t.claims, null, 2))}</pre>` : ''}`,
+      )
+      .join('');
   } else if (bearerClaims) {
     tokenTab = `
       <p class="muted" style="margin-top:0;">This step doesn't issue a new token — it uses the resource access_token from T3.</p>
       <div class="field-label">DECODED CLAIMS (from Authorization header)</div>
       <pre class="code-dark">${escapeHtml(JSON.stringify(bearerClaims, null, 2))}</pre>`;
+  } else if (status === 'error') {
+    tokenTab = `<p class="muted" style="margin:0;">This call failed — no token was issued. See the Response tab.</p>`;
   } else {
     tokenTab = `<p class="muted" style="margin:0;">No token associated with this call.</p>`;
   }
@@ -314,7 +336,7 @@ export function renderDebugFragments(stopped: StoppedState | null): DebugFragmen
   const stepStatuses: Record<number, StepStatus> = {};
   const stepCards: Record<number, string> = {};
   for (const step of STEPS) {
-    stepStatuses[step.n] = statusOf(getLatestCallByLabel(step.label));
+    stepStatuses[step.n] = statusOf(getLatestCallForStep(step));
     stepCards[step.n] = buildStepCard(step);
   }
   return { stepStatuses, stepCards, feedHtml: buildFeedHtml(), stopped };
@@ -393,6 +415,10 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     .chat-header { padding: 16px 18px 12px; border-bottom: 1px solid var(--border); }
     .chat-header h1 { font-size: 17px; margin: 0 0 2px; }
     .chat-header .subtitle { color: var(--muted); font-size: 12.5px; margin: 0; }
+    .flow-tag {
+      display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca;
+    }
     .chat-toolbar { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; flex-wrap: wrap; }
     .chat-feed { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; max-height: 480px; }
     .bubble {
@@ -520,12 +546,26 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       <div class="chat-header">
         <h1>killswitch-agent</h1>
         <p class="subtitle">Okta Cross App Access (XAA) test harness</p>
+        ${
+          opts.loginFlow
+            ? `<span class="flow-tag">Testing: ${
+                opts.loginFlow === 'agent' ? 'Agent app login (/agentapplogin)' : 'Resource app login (/login)'
+              }</span>`
+            : ''
+        }
       </div>
       <div class="chat-toolbar">
         ${
           opts.loggedIn
-            ? '<button type="button" class="pill" id="xaaLoginBtn">Test XAA login</button>'
-            : '<a class="plain" href="/login"><button type="button" class="pill">Log in with Okta</button></a>'
+            ? '<select id="subjectTokenType" class="pill" title="Which token to send as subject_token for the ID-JAG exchange">' +
+              '<option value="access_token">Use access_token</option>' +
+              '<option value="id_token">Use ID token</option>' +
+              '</select>' +
+              '<button type="button" class="pill" id="xaaLoginBtn">Test XAA login</button>' +
+              `<a class="plain" href="${opts.loginFlow === 'agent' ? '/login' : '/agentapplogin'}"><button type="button" class="pill">Switch to ${opts.loginFlow === 'agent' ? 'Resource' : 'Agent'} app login</button></a>` +
+              '<a class="plain" href="/logout"><button type="button" class="pill">Logout</button></a>'
+            : '<a class="plain" href="/login"><button type="button" class="pill">Log in via Resource app</button></a>' +
+              '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Log in via Agent app</button></a>'
         }
       </div>
       <div class="chat-feed" id="chatFeed">${feedHtml}</div>
@@ -627,9 +667,14 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     var xaaLoginBtn = document.getElementById('xaaLoginBtn');
     if (xaaLoginBtn) {
       xaaLoginBtn.addEventListener('click', async function () {
-        addPendingBubble('Running ID-JAG exchange...');
+        var subjectTokenType = document.getElementById('subjectTokenType').value;
+        addPendingBubble('Running ID-JAG exchange using ' + subjectTokenType + '...');
         try {
-          await fetch('/xaa/login', { method: 'POST' });
+          await fetch('/xaa/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subjectTokenType }),
+          });
         } catch (e) {}
         await refreshFragments();
       });

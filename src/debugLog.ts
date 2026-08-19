@@ -40,10 +40,23 @@ export function getCalls(): CallLogEntry[] {
   return calls;
 }
 
-export function getLatestCallByLabel(label: string): CallLogEntry | undefined {
-  return calls.find((c) => c.label === label);
-}
-
 export function getTokens(): TokenEntry[] {
   return tokens;
+}
+
+export function clearHistory(): void {
+  calls.length = 0;
+  tokens.length = 0;
+}
+
+export function clearCallsByLabel(labels: string[]): void {
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (labels.includes(calls[i].label)) calls.splice(i, 1);
+  }
+}
+
+export function clearTokensByLabel(labels: string[]): void {
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (labels.includes(tokens[i].label)) tokens.splice(i, 1);
+  }
 }

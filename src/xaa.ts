@@ -2,7 +2,7 @@ import { decodeJwt } from 'jose';
 import { config } from './config';
 import { buildClientAssertion } from './clientAssertion';
 import { tracedFetch } from './tracedFetch';
-import { recordToken, recordCall } from './debugLog';
+import { recordToken, recordCall, clearCallsByLabel, clearTokensByLabel } from './debugLog';
 
 function safeDecode(token: string): Record<string, unknown> | undefined {
   try {
@@ -12,12 +12,20 @@ function safeDecode(token: string): Record<string, unknown> | undefined {
   }
 }
 
+export type SubjectTokenType = 'access_token' | 'id_token';
+
+const SUBJECT_TOKEN_TYPE_URN: Record<SubjectTokenType, string> = {
+  access_token: 'urn:ietf:params:oauth:token-type:access_token',
+  id_token: 'urn:ietf:params:oauth:token-type:id_token',
+};
+
 /**
- * Step 2 of XAA (RFC 8693 token exchange): trade the user's access_token for
- * an ID-JAG, authenticating the agent with a signed client_assertion
- * (private_key_jwt) per the Identity Assertion Authorization Grant draft.
+ * Step 2 of XAA (RFC 8693 token exchange): trade the user's subject token
+ * (access_token or ID token) for an ID-JAG, authenticating the agent with a
+ * signed client_assertion (private_key_jwt) per the Identity Assertion
+ * Authorization Grant draft.
  */
-async function requestIdJag(userAccessToken: string): Promise<string> {
+async function requestIdJag(subjectToken: string, subjectTokenType: SubjectTokenType): Promise<string> {
   const tokenEndpoint = `${config.oktaOrgUrl}/oauth2/v1/token`;
   let clientAssertion: string;
   try {
@@ -31,8 +39,8 @@ async function requestIdJag(userAccessToken: string): Promise<string> {
   const body = new URLSearchParams({
     grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
     requested_token_type: 'urn:ietf:params:oauth:token-type:id-jag',
-    subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-    subject_token: userAccessToken,
+    subject_token_type: SUBJECT_TOKEN_TYPE_URN[subjectTokenType],
+    subject_token: subjectToken,
     client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
     client_assertion: clientAssertion,
     audience,
@@ -87,8 +95,16 @@ async function exchangeIdJagForAccessToken(idJag: string): Promise<{ accessToken
   return { accessToken: json.access_token, expiresIn: json.expires_in ?? 3600 };
 }
 
-async function runXaaExchange(userAccessToken: string): Promise<{ accessToken: string; expiresIn: number }> {
-  const idJag = await requestIdJag(userAccessToken);
+async function runXaaExchange(
+  subjectToken: string,
+  subjectTokenType: SubjectTokenType,
+): Promise<{ accessToken: string; expiresIn: number }> {
+  // Every fresh attempt starts clean: otherwise a failure partway through
+  // (e.g. T2 rejecting an ID token) would leave T3's card still showing the
+  // token/result from a previous, unrelated successful attempt.
+  clearCallsByLabel(['xaa:id-jag-request', 'xaa:resource-token-exchange']);
+  clearTokensByLabel(['ID-JAG', 'resource access_token']);
+  const idJag = await requestIdJag(subjectToken, subjectTokenType);
   return exchangeIdJagForAccessToken(idJag);
 }
 
@@ -98,7 +114,10 @@ async function runXaaExchange(userAccessToken: string): Promise<{ accessToken: s
  * still valid, so a killswitch that revoked it upstream shows up as a real
  * rejection here instead of the app quietly reusing a still-valid token.
  */
-export async function testXaaLogin(userAccessToken: string): Promise<string> {
-  const { accessToken } = await runXaaExchange(userAccessToken);
+export async function testXaaLogin(
+  subjectToken: string,
+  subjectTokenType: SubjectTokenType = 'access_token',
+): Promise<string> {
+  const { accessToken } = await runXaaExchange(subjectToken, subjectTokenType);
   return accessToken;
 }

@@ -2,14 +2,16 @@ import crypto from 'node:crypto';
 import express from 'express';
 import session from 'express-session';
 import { config } from './config';
-import { buildAuthorizeUrl, exchangeCodeForToken } from './oidc';
+import { buildAuthorizeUrl, exchangeCodeForToken, buildAgentAuthorizeUrl, exchangeAgentCodeForToken } from './oidc';
 import { testXaaLogin } from './xaa';
 import { callResourceApi } from './resourceClient';
 import { evaluate } from './policy';
 import { triggerKillswitch, triggerActivation } from './killswitch';
 import { renderDebugPage, renderDebugFragments } from './debugPage';
+import { renderLandingPage } from './landingPage';
 import { derivePublicJwk } from './publicKeyInfo';
 import { getAgentStoppedState } from './agentState';
+import { clearHistory, clearCallsByLabel } from './debugLog';
 
 const app = express();
 // Render (and most PaaS hosts) terminate TLS at a proxy and forward plain HTTP
@@ -31,10 +33,37 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/', (req, res) => {
+  res.set('Content-Type', 'text/html');
+  res.send(
+    renderLandingPage({
+      loggedIn: Boolean(req.session.userAccessToken),
+      loginFlow: req.session.loginFlow,
+      adminKey: config.adminTriggerSecret,
+    }),
+  );
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/');
+  });
+});
+
 app.get('/login', (req, res) => {
+  clearHistory();
   const state = crypto.randomUUID();
   req.session.oauthState = state;
+  req.session.loginFlow = 'resource';
   res.redirect(buildAuthorizeUrl(state));
+});
+
+app.get('/agentapplogin', (req, res) => {
+  clearHistory();
+  const state = crypto.randomUUID();
+  req.session.oauthState = state;
+  req.session.loginFlow = 'agent';
+  res.redirect(buildAgentAuthorizeUrl(state));
 });
 
 app.get('/callback', async (req, res) => {
@@ -46,8 +75,10 @@ app.get('/callback', async (req, res) => {
   }
 
   try {
-    const { accessToken } = await exchangeCodeForToken(code);
+    const { accessToken, idToken } =
+      req.session.loginFlow === 'agent' ? await exchangeAgentCodeForToken(code) : await exchangeCodeForToken(code);
     req.session.userAccessToken = accessToken;
+    req.session.userIdToken = idToken;
     res.redirect(debugUrl);
   } catch (err) {
     res.redirect(`${debugUrl}&error=${encodeURIComponent((err as Error).message)}`);
@@ -63,6 +94,7 @@ app.get('/debug', (req, res) => {
     renderDebugPage({
       adminKey: config.adminTriggerSecret,
       loggedIn: Boolean(req.session.userAccessToken),
+      loginFlow: req.session.loginFlow,
       error: typeof req.query.error === 'string' ? req.query.error : undefined,
       stopped: getAgentStoppedState(),
     }),
@@ -97,8 +129,14 @@ app.post('/xaa/login', async (req, res) => {
     return res.status(401).json({ error: 'not_logged_in' });
   }
 
+  const subjectTokenType = req.body?.subjectTokenType === 'id_token' ? 'id_token' : 'access_token';
+  const subjectToken = subjectTokenType === 'id_token' ? req.session.userIdToken : userAccessToken;
+  if (!subjectToken) {
+    return res.status(400).json({ error: 'no_id_token', message: 'No ID token was captured for this login — log in again.' });
+  }
+
   try {
-    const accessToken = await testXaaLogin(userAccessToken);
+    const accessToken = await testXaaLogin(subjectToken, subjectTokenType);
     res.json({ status: 'ok', resourceAccessToken: accessToken });
   } catch (err) {
     res.status(502).json({ error: 'xaa_exchange_failed', detail: (err as Error).message });
@@ -126,7 +164,23 @@ app.post('/agent/act', async (req, res) => {
     // action re-runs the full XAA exchange fresh, so a killswitch that
     // actually revoked the Agent at Okta shows up as a real rejection here
     // instead of the app silently trusting a still-valid cached token.
-    const accessToken = await testXaaLogin(userAccessToken);
+    //
+    // Under the Agent app login flow there's no delegation policy covering
+    // the Agent's own access_token, so tool calls must use the ID token
+    // instead. The access_token option in "Test XAA login" stays available
+    // there purely for negative testing.
+    const subjectTokenType = req.session.loginFlow === 'agent' ? 'id_token' : 'access_token';
+    const subjectToken = subjectTokenType === 'id_token' ? req.session.userIdToken : userAccessToken;
+    if (!subjectToken) {
+      return res
+        .status(400)
+        .json({ error: 'no_id_token', message: 'No ID token was captured for this login — log in again.' });
+    }
+    // Clear T4's stale result too — if the exchange below fails, T4 should
+    // show "not called yet" for this attempt, not a leftover success from an
+    // earlier, unrelated action.
+    clearCallsByLabel(['resource:api-call']);
+    const accessToken = await testXaaLogin(subjectToken, subjectTokenType);
     const result = await callResourceApi(accessToken, matched, params);
     res.json({ result });
   } catch (err) {
