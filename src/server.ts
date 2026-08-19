@@ -67,8 +67,13 @@ app.get('/agentapplogin', (req, res) => {
 });
 
 app.get('/callback', async (req, res) => {
-  const { code, state } = req.query;
+  const { code, state, error, error_description: errorDescription } = req.query;
   const debugUrl = `/debug?key=${encodeURIComponent(config.adminTriggerSecret)}`;
+
+  if (typeof error === 'string') {
+    const detail = typeof errorDescription === 'string' ? `${error}: ${errorDescription}` : error;
+    return res.redirect(`${debugUrl}&error=${encodeURIComponent(`Okta rejected the login request: ${detail}`)}`);
+  }
 
   if (typeof code !== 'string' || state !== req.session.oauthState) {
     return res.redirect(`${debugUrl}&error=${encodeURIComponent('Invalid or expired login callback (state mismatch or missing code)')}`);

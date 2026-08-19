@@ -23,7 +23,7 @@ export function buildAuthorizeUrl(state: string): string {
   const url = new URL(`${config.oktaOrgUrl}/oauth2/${config.loginAuthServerId}/v1/authorize`);
   url.searchParams.set('client_id', config.resourceAppClientId);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', 'openid profile mcp:read');
+  url.searchParams.set('scope', 'openid profile');
   url.searchParams.set('redirect_uri', config.agentRedirectUri);
   url.searchParams.set('state', state);
   url.searchParams.set('resource', config.loginResource);
@@ -70,7 +70,7 @@ export function buildAgentAuthorizeUrl(state: string): string {
   const url = new URL(`${config.oktaOrgUrl}/oauth2/${config.loginAuthServerId}/v1/authorize`);
   url.searchParams.set('client_id', config.agentClientId);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', 'openid profile mcp:read');
+  url.searchParams.set('scope', 'openid profile');
   url.searchParams.set('redirect_uri', config.agentRedirectUri);
   url.searchParams.set('state', state);
   return url.toString();
