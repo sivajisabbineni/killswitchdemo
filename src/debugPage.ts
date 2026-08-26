@@ -120,13 +120,18 @@ function formatBody(body?: string): string {
   try {
     return `<pre class="code-dark">${escapeHtml(JSON.stringify(JSON.parse(body), null, 2))}</pre>`;
   } catch {
-    // form-urlencoded bodies: one param per line, matching the reference UI's BODY block.
-    if (body.includes('=') && body.includes('&')) {
-      const formatted = body
-        .split('&')
-        .map((pair, i) => (i === 0 ? pair : '&' + pair))
-        .join('\n');
-      return `<pre class="code-dark">${escapeHtml(formatted)}</pre>`;
+    // form-urlencoded bodies: one decoded key=value per line (URLSearchParams
+    // decodes %XX escapes automatically), matching the reference UI's BODY block.
+    if (body.includes('=')) {
+      try {
+        const params = new URLSearchParams(body);
+        const formatted = Array.from(params.entries())
+          .map(([k, v]) => `${k}=${v}`)
+          .join('\n');
+        return `<pre class="code-dark">${escapeHtml(formatted)}</pre>`;
+      } catch {
+        return `<pre class="code-dark">${escapeHtml(body)}</pre>`;
+      }
     }
     return `<pre class="code-dark">${escapeHtml(body)}</pre>`;
   }
