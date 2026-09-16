@@ -76,6 +76,11 @@ export const config = {
   resourceAppClientId: required('RESOURCE_APP_CLIENT_ID'),
   resourceAppClientSecret: required('RESOURCE_APP_CLIENT_SECRET'),
   resourceApiBaseUrl: required('RESOURCE_API_BASE_URL'),
+
+  // --- M2M login (alternate login flow: no human user, client_credentials) ---
+  resourceM2mClientId: required('RESOURCE_M2M_APP_CLIENT_ID'),
+  resourceM2mClientSecret: required('RESOURCE_M2M_CLIENT_SECRET'),
+
   xaaScope: process.env.XAA_SCOPE || 'openid',
 
   sessionSecret: required('SESSION_SECRET'),

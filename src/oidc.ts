@@ -102,3 +102,35 @@ export async function exchangeAgentCodeForToken(code: string): Promise<{ accessT
   }
   return { accessToken: json.access_token, idToken: json.id_token };
 }
+
+/**
+ * Third login flow: no human user at all — the Agent authenticates as itself
+ * via client_credentials, using the M2M app's own client_secret (not the
+ * Agent's private_key_jwt). There's no ID token in this grant, so the
+ * resulting access_token is the only subject_token available for the ID-JAG
+ * exchange in xaa.ts. The `resource` param is required here for the same
+ * reason it is on the other login flows: it's what becomes the token's `aud`
+ * claim, which the ID-JAG request's audience check relies on.
+ */
+export async function exchangeM2mClientCredentials(): Promise<{ accessToken: string }> {
+  const tokenUrl = `${config.oktaOrgUrl}/oauth2/${config.loginAuthServerId}/v1/token`;
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    resource: config.loginResource,
+    scope: config.xaaScope,
+  });
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Authorization:
+      'Basic ' + Buffer.from(`${config.resourceM2mClientId}:${config.resourceM2mClientSecret}`).toString('base64'),
+  };
+
+  const res = await tracedFetch('m2mlogin:token-exchange', tokenUrl, { method: 'POST', headers, body });
+  if (!res.ok) {
+    throw new Error(`M2M login token exchange failed: ${res.status} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { access_token: string };
+  recordToken('access_token (M2M login)', json.access_token, safeDecode(json.access_token));
+  return { accessToken: json.access_token };
+}

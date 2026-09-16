@@ -14,7 +14,7 @@ function escapeHtml(value: string): string {
 interface DebugPageOptions {
   adminKey: string;
   loggedIn: boolean;
-  loginFlow?: 'resource' | 'agent';
+  loginFlow?: 'resource' | 'agent' | 'm2m';
   error?: string;
   stopped: StoppedState | null;
 }
@@ -35,13 +35,14 @@ interface StepDef {
 const STEPS: StepDef[] = [
   {
     n: 1,
-    labels: ['login:token-exchange', 'agentlogin:token-exchange'],
+    labels: ['login:token-exchange', 'agentlogin:token-exchange', 'm2mlogin:token-exchange'],
     title: 'ID & Access Tokens',
     subtitle: 'User → Okta (OIDC authorization code)',
-    hint: 'Standard OIDC login — the human user authenticates, via either the Resource App (client_secret_basic) or the Agent app (private_key_jwt), and gets back a user access_token and ID token.',
+    hint: 'Standard OIDC login — the human user authenticates, via either the Resource App (client_secret_basic) or the Agent app (private_key_jwt), and gets back a user access_token and ID token. The M2M login skips the human user entirely (client_credentials) and gets back only an access_token.',
     tokenLabelsByCallLabel: {
       'login:token-exchange': ['user access_token (login)', 'ID token (login)'],
       'agentlogin:token-exchange': ['user access_token (agent login)', 'ID token (agent login)'],
+      'm2mlogin:token-exchange': ['access_token (M2M login)'],
     },
   },
   {
@@ -554,7 +555,11 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         ${
           opts.loginFlow
             ? `<span class="flow-tag">Testing: ${
-                opts.loginFlow === 'agent' ? 'Agent app login (/agentapplogin)' : 'Resource app login (/login)'
+                opts.loginFlow === 'agent'
+                  ? 'Agent app login (/agentapplogin)'
+                  : opts.loginFlow === 'm2m'
+                    ? 'M2M login (/m2mlogin)'
+                    : 'Resource app login (/login)'
               }</span>`
             : ''
         }
@@ -567,10 +572,19 @@ export function renderDebugPage(opts: DebugPageOptions): string {
               '<option value="id_token">Use ID token</option>' +
               '</select>' +
               '<button type="button" class="pill" id="xaaLoginBtn">Test XAA login</button>' +
-              `<a class="plain" href="${opts.loginFlow === 'agent' ? '/login' : '/agentapplogin'}"><button type="button" class="pill">Switch to ${opts.loginFlow === 'agent' ? 'Resource' : 'Agent'} app login</button></a>` +
+              (opts.loginFlow !== 'resource'
+                ? '<a class="plain" href="/login"><button type="button" class="pill">Switch to Resource app login</button></a>'
+                : '') +
+              (opts.loginFlow !== 'agent'
+                ? '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Switch to Agent app login</button></a>'
+                : '') +
+              (opts.loginFlow !== 'm2m'
+                ? '<a class="plain" href="/m2mlogin"><button type="button" class="pill">Switch to M2M login</button></a>'
+                : '') +
               '<a class="plain" href="/logout"><button type="button" class="pill">Logout</button></a>'
             : '<a class="plain" href="/login"><button type="button" class="pill">Log in via Resource app</button></a>' +
-              '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Log in via Agent app</button></a>'
+              '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Log in via Agent app</button></a>' +
+              '<a class="plain" href="/m2mlogin"><button type="button" class="pill">Log in via M2M login</button></a>'
         }
       </div>
       <div class="chat-feed" id="chatFeed">${feedHtml}</div>

@@ -2,7 +2,13 @@ import crypto from 'node:crypto';
 import express from 'express';
 import session from 'express-session';
 import { config } from './config';
-import { buildAuthorizeUrl, exchangeCodeForToken, buildAgentAuthorizeUrl, exchangeAgentCodeForToken } from './oidc';
+import {
+  buildAuthorizeUrl,
+  exchangeCodeForToken,
+  buildAgentAuthorizeUrl,
+  exchangeAgentCodeForToken,
+  exchangeM2mClientCredentials,
+} from './oidc';
 import { testXaaLogin } from './xaa';
 import { callResourceApi } from './resourceClient';
 import { evaluate } from './policy';
@@ -64,6 +70,22 @@ app.get('/agentapplogin', (req, res) => {
   req.session.oauthState = state;
   req.session.loginFlow = 'agent';
   res.redirect(buildAgentAuthorizeUrl(state));
+});
+
+app.get('/m2mlogin', async (req, res) => {
+  clearHistory();
+  const debugUrl = `/debug?key=${encodeURIComponent(config.adminTriggerSecret)}`;
+  // No redirect-based authorize step here: client_credentials is a direct,
+  // back-channel token request — there's no human user or authorization code.
+  req.session.loginFlow = 'm2m';
+  try {
+    const { accessToken } = await exchangeM2mClientCredentials();
+    req.session.userAccessToken = accessToken;
+    req.session.userIdToken = undefined;
+    res.redirect(debugUrl);
+  } catch (err) {
+    res.redirect(`${debugUrl}&error=${encodeURIComponent((err as Error).message)}`);
+  }
 });
 
 app.get('/callback', async (req, res) => {
@@ -173,7 +195,9 @@ app.post('/agent/act', async (req, res) => {
     // Under the Agent app login flow there's no delegation policy covering
     // the Agent's own access_token, so tool calls must use the ID token
     // instead. The access_token option in "Test XAA login" stays available
-    // there purely for negative testing.
+    // there purely for negative testing. The M2M flow never has an ID token
+    // at all (client_credentials doesn't issue one), so it always uses its
+    // access_token.
     const subjectTokenType = req.session.loginFlow === 'agent' ? 'id_token' : 'access_token';
     const subjectToken = subjectTokenType === 'id_token' ? req.session.userIdToken : userAccessToken;
     if (!subjectToken) {

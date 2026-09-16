@@ -1,13 +1,19 @@
 export interface LandingPageOptions {
   loggedIn: boolean;
-  loginFlow?: 'resource' | 'agent';
+  loginFlow?: 'resource' | 'agent' | 'm2m';
   adminKey: string;
 }
 
 export function renderLandingPage(opts: LandingPageOptions): string {
   const debugUrl = `/debug?key=${encodeURIComponent(opts.adminKey)}`;
   const flowLabel =
-    opts.loginFlow === 'agent' ? 'Agent app (/agentapplogin)' : opts.loginFlow === 'resource' ? 'Resource app (/login)' : null;
+    opts.loginFlow === 'agent'
+      ? 'Agent app (/agentapplogin)'
+      : opts.loginFlow === 'm2m'
+        ? 'M2M login (/m2mlogin)'
+        : opts.loginFlow === 'resource'
+          ? 'Resource app (/login)'
+          : null;
 
   return `<!DOCTYPE html>
 <html>
@@ -47,6 +53,7 @@ export function renderLandingPage(opts: LandingPageOptions): string {
     <div class="options">
       <a class="plain" href="/login"><button class="btn-primary">Log in via Resource app</button></a>
       <a class="plain" href="/agentapplogin"><button>Log in via Agent app</button></a>
+      <a class="plain" href="/m2mlogin"><button>Log in via M2M login</button></a>
     </div>
     <div class="footer-links">
       ${opts.loggedIn ? `<a href="${debugUrl}">Go to debug page</a>` : ''}
