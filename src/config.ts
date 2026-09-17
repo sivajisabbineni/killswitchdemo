@@ -83,6 +83,32 @@ export const config = {
 
   xaaScope: process.env.XAA_SCOPE || 'openid',
 
+  // --- Second Agent (chained XAA hop): User -> Agent 1 -> Agent 2 -> Resource ---
+  // Optional — only needed for the "Test Chained XAA" flow in /debug. Agent 2
+  // authenticates itself with its own private_key_jwt (a separate Okta app,
+  // separate keypair from the first Agent) and takes Agent 1's resource
+  // access_token as the subject_token for a further ID-JAG exchange.
+  secondAgentClientId: process.env.SECOND_AGENT_CLIENT_ID,
+  secondAgentKeyId: process.env.SECOND_AGENT_KEY_ID,
+  secondAgentPrivateKeyPem: process.env.SECOND_AGENT_PRIVATE_KEY_PEM?.replace(/\\n/g, '\n'),
+  secondResourceAuthServerId: process.env.SECOND_RESOURCE_AUTH_SERVER_ID,
+  secondResourceAppTokenEndpoint: process.env.SECOND_RESOURCE_APP_TOKEN_ENDPOINT,
+  secondXaaScope: process.env.SECOND_XAA_SCOPE || 'openid',
+  // RFC 8707 resource indicator naming Agent 2 as the intended recipient of
+  // the ID-JAG requested in the first hop — must match the Audience/resource
+  // URL configured on Agent 2's Machine access tab in Okta, or the delegation
+  // policy check rejects the subject_token with "no delegation policy
+  // authorizes this token" even once a caller link exists.
+  secondAgentResourceUrl: process.env.SECOND_AGENT_RESOURCE_URL,
+
+  // --- Third hop target: the actual downstream resource Agent 2 calls after
+  // receiving Agent 1's hand-off token (hop B) — a distinct auth server from
+  // both Agent 1's and Agent 2's own, matching the reference implementation's
+  // separate "Finance MCP" resource server behind the Finance Agent.
+  thirdResourceAuthServerId: process.env.THIRD_RESOURCE_AUTH_SERVER_ID,
+  thirdResourceAppTokenEndpoint: process.env.THIRD_RESOURCE_APP_TOKEN_ENDPOINT,
+  thirdXaaScope: process.env.THIRD_XAA_SCOPE || 'openid',
+
   sessionSecret: required('SESSION_SECRET'),
   killswitchWebhookUrl: required('KILLSWITCH_WEBHOOK_URL'),
   killswitchWebhookResetUrl: required('KILLSWITCH_WEBHOOK_RESET_URL'),

@@ -17,6 +17,7 @@ interface DebugPageOptions {
   loginFlow?: 'resource' | 'agent' | 'm2m';
   error?: string;
   stopped: StoppedState | null;
+  chainedXaaConfigured: boolean;
 }
 
 type StepStatus = 'pending' | 'success' | 'error';
@@ -66,11 +67,61 @@ const STEPS: StepDef[] = [
     labels: ['resource:api-call'],
     title: 'Agent Action',
     subtitle: 'Agent → Resource API',
-    hint: 'The Agent calls the resource API using the resource access_token from step 3 (only if the requested action is on the policy allow-list).',
+    hint: 'The Agent calls the resource API using the resource access_token from step 3 (only if the requested action is on the policy allow-list) — single-hop XAA, no chaining to a second Agent.',
+  },
+  {
+    n: 5,
+    labels: ['xaa2:id-jag-request'],
+    title: 'Get ID-JAG (Agent 1 → Agent 2)',
+    subtitle: 'Agent 1 → Okta (org token endpoint)',
+    hint: "Chained XAA, hop A — Agent 1 requests an ID-JAG whose audience is Agent 2's own custom authorization server (not the single-hop resource app), naming Agent 2 as the `resource` this ID-JAG is destined for. Still signed with Agent 1's own private_key_jwt.",
+    tokenLabelsByCallLabel: { 'xaa2:id-jag-request': ['ID-JAG (Agent 1 → Agent 2)'] },
+  },
+  {
+    n: 6,
+    labels: ['xaa2:resource-token-exchange'],
+    title: 'Agent 1 → Agent 2 Access Token',
+    subtitle: 'Agent 1 → Agent 2 token endpoint',
+    hint: "RFC 7523 jwt-bearer exchange — Agent 1 redeems its ID-JAG at Agent 2's own token endpoint, getting an access_token that authorizes Agent 1 to invoke Agent 2.",
+    tokenLabelsByCallLabel: { 'xaa2:resource-token-exchange': ['Agent 1 → Agent 2 access_token'] },
+  },
+  {
+    n: 7,
+    labels: ['xaa3:id-jag-request'],
+    title: 'Get ID-JAG (Agent 2)',
+    subtitle: 'Agent 2 → Okta (org token endpoint)',
+    hint: "Chained XAA, hop B — Agent 2 takes the access_token from step 6 as its own subject_token and requests a further ID-JAG targeting the downstream resource's auth server, authenticating with its own private_key_jwt client_assertion.",
+    tokenLabelsByCallLabel: { 'xaa3:id-jag-request': ['ID-JAG (Agent 2)'] },
+  },
+  {
+    n: 8,
+    labels: ['xaa3:resource-token-exchange'],
+    title: 'Resource Access Token (Agent 2)',
+    subtitle: 'Agent 2 → Resource App token endpoint',
+    hint: "RFC 7523 jwt-bearer exchange — Agent 2 redeems its ID-JAG at the resource app's own token endpoint for the final resource-scoped access_token, completing User → Agent 1 → Agent 2 → Resource.",
+    tokenLabelsByCallLabel: { 'xaa3:resource-token-exchange': ['resource access_token (Agent 2)'] },
+  },
+  {
+    n: 9,
+    labels: ['resource:api-call-chained'],
+    title: 'Agent Action (Chained)',
+    subtitle: 'Agent 2 → Resource API',
+    hint: 'The Agent calls the resource API using the resource access_token from step 8 (only if the requested action is on the policy allow-list) — the final hop of User → Agent 1 → Agent 2 → Resource.',
   },
 ];
 
 const STEP_BY_LABEL = new Map(STEPS.flatMap((s) => s.labels.map((label) => [label, s] as const)));
+
+/**
+ * Call + token labels belonging to T1 (login) — kept out of any "clear the
+ * timeline for a fresh run" wipe, since the login step reflects the current
+ * session and should stay visible even when the run being cleared for
+ * doesn't touch login itself (e.g. re-running "Test XAA login").
+ */
+export const LOGIN_STEP_LABELS: string[] = [
+  ...STEPS[0].labels,
+  ...Object.values(STEPS[0].tokenLabelsByCallLabel ?? {}).flat(),
+];
 
 function getLatestCallForStep(step: StepDef): CallLogEntry | undefined {
   return getCalls().find((c) => step.labels.includes(c.label));
@@ -233,7 +284,7 @@ function buildStepCard(step: StepDef): string {
       .join('');
   } else if (bearerClaims) {
     tokenTab = `
-      <p class="muted" style="margin-top:0;">This step doesn't issue a new token — it uses the resource access_token from T3.</p>
+      <p class="muted" style="margin-top:0;">This step doesn't issue a new token — it uses the resource access_token from the preceding step.</p>
       <div class="field-label">DECODED CLAIMS (from Authorization header)</div>
       <pre class="code-dark">${escapeHtml(JSON.stringify(bearerClaims, null, 2))}</pre>`;
   } else if (status === 'error') {
@@ -273,7 +324,7 @@ function labelTitle(label: string): string {
 }
 
 function buildResourceSummary(c: CallLogEntry): string | undefined {
-  if (c.label !== 'resource:api-call' || !c.responseBody) return undefined;
+  if ((c.label !== 'resource:api-call' && c.label !== 'resource:api-call-chained') || !c.responseBody) return undefined;
   let path: string;
   try {
     path = new URL(c.url).pathname;
@@ -572,6 +623,11 @@ export function renderDebugPage(opts: DebugPageOptions): string {
               '<option value="id_token">Use ID token</option>' +
               '</select>' +
               '<button type="button" class="pill" id="xaaLoginBtn">Test XAA login</button>' +
+              (opts.chainedXaaConfigured
+                ? '<button type="button" class="pill" id="chainedXaaLoginBtn" title="User → Agent 1 → Agent 2 → Resource">Test Chained XAA</button>' +
+                  '<label class="pill" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;" title="When checked, Agent Action calls authorize with Agent 2\'s resource access_token (T8) instead of the single-hop token (T3), and show up as T9">' +
+                  '<input type="checkbox" id="chainedActionToggle" style="margin:0;" /> Actions via Chained XAA</label>'
+                : '') +
               (opts.loginFlow !== 'resource'
                 ? '<a class="plain" href="/login"><button type="button" class="pill">Switch to Resource app login</button></a>'
                 : '') +
@@ -699,13 +755,42 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       });
     }
 
-    async function postAgentAction(action, params) {
-      addPendingBubble('Sending "' + action + '"...');
+    var chainedXaaLoginBtn = document.getElementById('chainedXaaLoginBtn');
+    if (chainedXaaLoginBtn) {
+      chainedXaaLoginBtn.addEventListener('click', async function () {
+        var subjectTokenType = document.getElementById('subjectTokenType').value;
+        addPendingBubble('Running chained XAA (Agent 1 → Agent 2) using ' + subjectTokenType + '...');
+        var ok = false;
+        try {
+          var res = await fetch('/xaa/chained-login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subjectTokenType }),
+          });
+          ok = res.ok;
+        } catch (e) {}
+        if (ok) {
+          // T5–T8 succeeded — finish the chain by calling T9 (Agent Action,
+          // Chained) with Agent 2's resulting resource access_token, same as
+          // clicking an action pill in chained mode. If the exchange above
+          // failed, skip this: T9 should stay "not called yet", not show a
+          // stale or unrelated result.
+          await postAgentAction('resource.get', undefined, 'chained');
+        } else {
+          await refreshFragments();
+        }
+      });
+    }
+
+    async function postAgentAction(action, params, forceXaaMode) {
+      var chainedToggle = document.getElementById('chainedActionToggle');
+      var xaaMode = forceXaaMode || (chainedToggle && chainedToggle.checked ? 'chained' : undefined);
+      addPendingBubble('Sending "' + action + '"' + (xaaMode ? ' via Chained XAA' : '') + '...');
       try {
         await fetch('/agent/act', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action, params }),
+          body: JSON.stringify({ action, params, xaaMode }),
         });
       } catch (e) {}
       await refreshFragments();

@@ -11,6 +11,7 @@ export async function callResourceApi(
   accessToken: string,
   action: ResourceAction,
   params: Record<string, unknown> = {},
+  label = 'resource:api-call',
 ): Promise<unknown> {
   let path = action.path;
   const merged: Record<string, unknown> = { ...action.defaultParams, ...params };
@@ -18,7 +19,7 @@ export async function callResourceApi(
     path = path.replace(`:${key}`, encodeURIComponent(String(value)));
   }
 
-  const res = await tracedFetch('resource:api-call', `${config.resourceApiBaseUrl}${path}`, {
+  const res = await tracedFetch(label, `${config.resourceApiBaseUrl}${path}`, {
     method: action.method,
     headers: { Authorization: `Bearer ${accessToken}` },
   });

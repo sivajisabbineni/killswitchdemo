@@ -49,6 +49,21 @@ export function clearHistory(): void {
   tokens.length = 0;
 }
 
+/**
+ * Clears every call/token except those with a label in `keepLabels` — used to
+ * wipe T2 onward before a fresh XAA/Chained XAA/tool-call run while leaving
+ * the T1 login step visible, since the session (and its tokens) is still
+ * valid even though this run doesn't touch login.
+ */
+export function clearHistoryExceptLabels(keepLabels: string[]): void {
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (!keepLabels.includes(calls[i].label)) calls.splice(i, 1);
+  }
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (!keepLabels.includes(tokens[i].label)) tokens.splice(i, 1);
+  }
+}
+
 export function clearCallsByLabel(labels: string[]): void {
   for (let i = calls.length - 1; i >= 0; i--) {
     if (labels.includes(calls[i].label)) calls.splice(i, 1);

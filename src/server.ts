@@ -9,15 +9,15 @@ import {
   exchangeAgentCodeForToken,
   exchangeM2mClientCredentials,
 } from './oidc';
-import { testXaaLogin } from './xaa';
+import { testXaaLogin, testChainedXaaLogin, isChainedXaaConfigured } from './xaa';
 import { callResourceApi } from './resourceClient';
 import { evaluate } from './policy';
 import { triggerKillswitch, triggerActivation } from './killswitch';
-import { renderDebugPage, renderDebugFragments } from './debugPage';
+import { renderDebugPage, renderDebugFragments, LOGIN_STEP_LABELS } from './debugPage';
 import { renderLandingPage } from './landingPage';
 import { derivePublicJwk } from './publicKeyInfo';
 import { getAgentStoppedState } from './agentState';
-import { clearHistory, clearCallsByLabel } from './debugLog';
+import { clearHistory, clearHistoryExceptLabels } from './debugLog';
 
 const app = express();
 // Render (and most PaaS hosts) terminate TLS at a proxy and forward plain HTTP
@@ -124,6 +124,7 @@ app.get('/debug', (req, res) => {
       loginFlow: req.session.loginFlow,
       error: typeof req.query.error === 'string' ? req.query.error : undefined,
       stopped: getAgentStoppedState(),
+      chainedXaaConfigured: isChainedXaaConfigured(),
     }),
   );
 });
@@ -151,6 +152,11 @@ app.post('/xaa/login', async (req, res) => {
   // the real ID-JAG + resource-token exchange against Okta, so if the
   // killswitch webhook actually revoked the Agent's trust upstream, that
   // real rejection is what shows up in the timeline — not a locally faked one.
+  // Wipe T2 onward first so this run's cards start clean, not showing a
+  // stale step/token left over from a previous XAA/Chained XAA/tool-call
+  // attempt — but leave T1 (login) alone, since the session it reflects is
+  // still valid even though this run doesn't touch login itself.
+  clearHistoryExceptLabels(LOGIN_STEP_LABELS);
   const userAccessToken = req.session.userAccessToken;
   if (!userAccessToken) {
     return res.status(401).json({ error: 'not_logged_in' });
@@ -170,13 +176,38 @@ app.post('/xaa/login', async (req, res) => {
   }
 });
 
+app.post('/xaa/chained-login', async (req, res) => {
+  // Same "no local short-circuit" rationale as /xaa/login: always a live
+  // round-trip through both hops, so a revocation at either Agent shows up
+  // as a real rejection here. Same reasoning for wiping T2 onward up front
+  // (leaving T1 alone — see /xaa/login for why).
+  clearHistoryExceptLabels(LOGIN_STEP_LABELS);
+  const userAccessToken = req.session.userAccessToken;
+  if (!userAccessToken) {
+    return res.status(401).json({ error: 'not_logged_in' });
+  }
+
+  const subjectTokenType = req.body?.subjectTokenType === 'id_token' ? 'id_token' : 'access_token';
+  const subjectToken = subjectTokenType === 'id_token' ? req.session.userIdToken : userAccessToken;
+  if (!subjectToken) {
+    return res.status(400).json({ error: 'no_id_token', message: 'No ID token was captured for this login — log in again.' });
+  }
+
+  try {
+    const { firstHopAccessToken, secondHopAccessToken } = await testChainedXaaLogin(subjectToken, subjectTokenType);
+    res.json({ status: 'ok', firstHopAccessToken, secondHopAccessToken });
+  } catch (err) {
+    res.status(502).json({ error: 'chained_xaa_exchange_failed', detail: (err as Error).message });
+  }
+});
+
 app.post('/agent/act', async (req, res) => {
   const userAccessToken = req.session.userAccessToken;
   if (!userAccessToken) {
     return res.status(401).json({ error: 'not_logged_in' });
   }
 
-  const { action, params } = req.body ?? {};
+  const { action, params, xaaMode } = req.body ?? {};
   const matched = evaluate(action);
 
   if (!matched) {
@@ -205,12 +236,23 @@ app.post('/agent/act', async (req, res) => {
         .status(400)
         .json({ error: 'no_id_token', message: 'No ID token was captured for this login — log in again.' });
     }
-    // Clear T4's stale result too — if the exchange below fails, T4 should
-    // show "not called yet" for this attempt, not a leftover success from an
-    // earlier, unrelated action.
-    clearCallsByLabel(['resource:api-call']);
-    const accessToken = await testXaaLogin(subjectToken, subjectTokenType);
-    const result = await callResourceApi(accessToken, matched, params);
+    // Chained mode: the action is authorized with Agent 2's resource
+    // access_token (the end of User -> Agent 1 -> Agent 2 -> Resource), not
+    // the single-hop token — Agent 2, not Agent 1, is the one actually
+    // invoking the resource in this mode. It gets its own call label
+    // ('resource:api-call-chained', rendered as T9) so it appears after the
+    // chained hops in the stepper; without chaining it reuses T4.
+    const isChained = xaaMode === 'chained';
+    const resourceCallLabel = isChained ? 'resource:api-call-chained' : 'resource:api-call';
+    // Wipe T2 onward first (leaving T1 alone) — if the exchange below fails
+    // partway through, every other step should show "not called yet" for
+    // this attempt, not a leftover success from an earlier, unrelated
+    // XAA/Chained XAA/tool-call run.
+    clearHistoryExceptLabels(LOGIN_STEP_LABELS);
+    const accessToken = isChained
+      ? (await testChainedXaaLogin(subjectToken, subjectTokenType)).secondHopAccessToken
+      : await testXaaLogin(subjectToken, subjectTokenType);
+    const result = await callResourceApi(accessToken, matched, params, resourceCallLabel);
     res.json({ result });
   } catch (err) {
     res.status(502).json({ error: 'resource_call_failed', detail: (err as Error).message });
