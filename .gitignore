@@ -1,7 +1,7 @@
 node_modules/
 dist/
 config/agent.properties
-.env
+*.env
 *.log
 .claude/
 .DS_Store

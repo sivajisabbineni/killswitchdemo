@@ -19,6 +19,7 @@ interface DebugPageOptions {
   stopped: StoppedState | null;
   chainedXaaConfigured: boolean;
   chatAssistantConfigured: boolean;
+  userIdentity?: string;
 }
 
 type StepStatus = 'pending' | 'success' | 'error';
@@ -518,6 +519,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       line-height: 1.5;
     }
     .app-shell {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -525,6 +527,17 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       max-width: 1000px;
       margin: 20px auto;
       padding: 0 16px 20px;
+    }
+    .user-identity {
+      position: absolute;
+      top: 20px;
+      right: 16px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #fff;
+      background: rgba(255,255,255,0.12);
+      padding: 5px 12px;
+      border-radius: 999px;
     }
     .chat-panel {
       width: 100%;
@@ -683,6 +696,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
   ${errorHtml}
   ${stoppedHtml}
   <div class="app-shell">
+    ${opts.userIdentity ? `<span class="user-identity">👤 ${escapeHtml(opts.userIdentity)}</span>` : ''}
     <aside class="chat-panel">
       <div class="chat-header">
         <h1>Marketing Cloud</h1>

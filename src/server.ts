@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import session from 'express-session';
+import { decodeJwt } from 'jose';
 import { config } from './config';
 import {
   buildAuthorizeUrl,
@@ -40,6 +41,21 @@ app.use(
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
+
+// Best-effort display identity for the top-right badge in /debug — prefers
+// the ID token's human-readable claims (never present for the M2M flow,
+// since client_credentials issues no ID token) and falls back to the
+// access_token's `sub`, which is always present.
+function getUserIdentity(req: express.Request): string | undefined {
+  const token = req.session.userIdToken ?? req.session.userAccessToken;
+  if (!token) return undefined;
+  try {
+    const claims = decodeJwt(token);
+    return (claims.email as string) || (claims.name as string) || (claims.preferred_username as string) || (claims.sub as string);
+  } catch {
+    return undefined;
+  }
+}
 
 app.get('/', (req, res) => {
   res.set('Content-Type', 'text/html');
@@ -141,6 +157,7 @@ app.get('/debug', (req, res) => {
       stopped: getAgentStoppedState(),
       chainedXaaConfigured: isChainedXaaConfigured(),
       chatAssistantConfigured: isChatAssistantConfigured(),
+      userIdentity: getUserIdentity(req),
     }),
   );
 });
