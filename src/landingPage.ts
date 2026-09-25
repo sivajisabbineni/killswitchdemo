@@ -19,35 +19,36 @@ export function renderLandingPage(opts: LandingPageOptions): string {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>killswitch-agent</title>
+  <title>Marketing Cloud</title>
   <style>
     * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f4f5f7; color: #1a1f24; margin: 0; min-height: 100vh;
+      background: linear-gradient(135deg, #001f45 0%, #004b93 55%, #0064b1 100%);
+      color: #1a1f24; margin: 0; min-height: 100vh;
       display: flex; align-items: center; justify-content: center;
     }
     .card {
-      background: #fff; border: 1px solid #e1e4e8; border-radius: 12px;
+      background: #fff; border: 1px solid #cfe0f0; border-radius: 16px;
       padding: 32px 36px; max-width: 420px; width: 100%; text-align: center;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+      box-shadow: 0 12px 32px rgba(0,31,69,0.35);
     }
-    h1 { font-size: 20px; margin: 0 0 6px; }
+    h1 { font-size: 22px; margin: 0 0 6px; color: #004b93; }
     p { color: #6b7280; font-size: 13.5px; margin: 0 0 20px; }
-    .status { background: #eef2ff; color: #4338ca; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 18px; }
+    .status { background: #eaf2fb; color: #004b93; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 18px; }
     .options { display: flex; flex-direction: column; gap: 10px; }
     button {
       font-family: inherit; font-size: 14px; font-weight: 600; padding: 10px 16px;
-      border-radius: 8px; border: 1px solid #e1e4e8; background: #fff; cursor: pointer; width: 100%;
+      border-radius: 8px; border: 1px solid #cfe0f0; background: #fff; cursor: pointer; width: 100%;
     }
-    .btn-primary { background: #2563eb; border-color: #1d4ed8; color: #fff; }
+    .btn-primary { background: #e32934; border-color: #c81e28; color: #fff; }
     a.plain { text-decoration: none; }
     .footer-links { margin-top: 18px; display: flex; justify-content: center; gap: 14px; font-size: 12.5px; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>killswitch-agent</h1>
+    <h1>Marketing Cloud</h1>
     <p>Choose how the human user logs in before testing the Okta Cross App Access (XAA) flow.</p>
     ${opts.loggedIn ? `<div class="status">Currently logged in via <strong>${flowLabel}</strong></div>` : ''}
     <div class="options">

@@ -19,6 +19,11 @@ AGENT_KEY_ID=
 # newlines if setting this as a single-line env var on Render.
 AGENT_PRIVATE_KEY_PEM=
 AGENT_REDIRECT_URI=http://localhost:3000/callback
+# Where Okta sends the browser back after /logout ends the Okta session too
+# (RP-initiated logout). Must be registered as an allowed "Sign-out redirect
+# URI" on the Okta app(s) used to log in, or Okta rejects the request.
+# Defaults to this app's own origin (derived from AGENT_REDIRECT_URI) if unset.
+POST_LOGOUT_REDIRECT_URI=
 # RFC 8707 resource indicator sent on the login's authorize + token requests.
 # Becomes the `aud` claim of the user's access_token (e.g. https://chattestagent.com).
 LOGIN_RESOURCE=
@@ -41,6 +46,15 @@ RESOURCE_APP_TOKEN_ENDPOINT=https://your-org.oktapreview.com/oauth2/default/v1/t
 # app's API base URL once you have one.
 RESOURCE_API_BASE_URL=https://httpbingo.org
 XAA_SCOPE=api:access:read
+
+# --- Chat assistant (optional) ---
+# Powers natural-language chat parsing in /debug (e.g. "initialize the XAA
+# flow") via the Anthropic API. Without it, the chat falls back to a small
+# set of hand-written phrase patterns.
+ANTHROPIC_API_KEY=
+# Only needed if ANTHROPIC_API_KEY is for an Anthropic-compatible proxy (e.g.
+# an internal LiteLLM gateway) rather than the public Anthropic API directly.
+ANTHROPIC_BASE_URL=
 
 # --- App session + killswitch ---
 SESSION_SECRET=change-me

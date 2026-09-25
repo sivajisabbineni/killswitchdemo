@@ -57,6 +57,8 @@ function required(name: string): string {
   return value;
 }
 
+const agentRedirectUri = required('AGENT_REDIRECT_URI');
+
 export const config = {
   port: Number(process.env.PORT) || 3000,
 
@@ -65,8 +67,14 @@ export const config = {
 
   agentClientId: required('AGENT_CLIENT_ID'),
   agentKeyId: required('AGENT_KEY_ID'),
-  agentRedirectUri: required('AGENT_REDIRECT_URI'),
+  agentRedirectUri,
   agentPrivateKeyPem: required('AGENT_PRIVATE_KEY_PEM').replace(/\\n/g, '\n'),
+  // Where Okta sends the browser back to after RP-initiated logout
+  // (/logout in server.ts) ends the user's Okta session. Must be registered
+  // as an allowed "Sign-out redirect URI" on whichever Okta app the active
+  // session logged into (the Resource App or the Agent App), or Okta rejects
+  // the end_session request. Defaults to this app's own origin.
+  postLogoutRedirectUri: process.env.POST_LOGOUT_REDIRECT_URI || `${new URL(agentRedirectUri).origin}/`,
   // RFC 8707 resource indicator for the login step — becomes the `aud` claim
   // of the user's access_token, which the ID-JAG request later relies on.
   loginResource: required('LOGIN_RESOURCE'),
@@ -108,6 +116,13 @@ export const config = {
   thirdResourceAuthServerId: process.env.THIRD_RESOURCE_AUTH_SERVER_ID,
   thirdResourceAppTokenEndpoint: process.env.THIRD_RESOURCE_APP_TOKEN_ENDPOINT,
   thirdXaaScope: process.env.THIRD_XAA_SCOPE || 'openid',
+
+  // Optional — powers natural-language chat parsing in /debug via the
+  // Anthropic API (or an Anthropic-compatible proxy, e.g. an internal LiteLLM
+  // gateway, via ANTHROPIC_BASE_URL). Without an API key, the chat falls back
+  // to plain command matching.
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+  anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
 
   sessionSecret: required('SESSION_SECRET'),
   killswitchWebhookUrl: required('KILLSWITCH_WEBHOOK_URL'),

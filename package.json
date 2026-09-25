@@ -11,6 +11,7 @@
     "dev": "ts-node src/server.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-session": "^1.18.0",

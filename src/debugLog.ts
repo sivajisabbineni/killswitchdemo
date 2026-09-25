@@ -12,6 +12,12 @@ export interface CallLogEntry {
   responseHeaders?: Record<string, string>;
   responseBody?: string;
   error?: string;
+  // Wall-clock time (ms) the outbound network call itself took — set by
+  // tracedFetch for real HTTP calls (Okta, resource API). Local actions
+  // (marketingStore reads/writes via localActions.ts) never set this, since
+  // they don't hit the network and shouldn't count toward the Okta exchange
+  // timer in debugPage.ts.
+  durationMs?: number;
 }
 
 export interface TokenEntry {

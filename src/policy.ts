@@ -1,7 +1,17 @@
 import type { ResourceAction } from './resourceClient';
 
-interface AllowedAction extends ResourceAction {
+export interface AllowedAction extends ResourceAction {
   description: string;
+  // 'local' actions are served in-process (e.g. the marketing data store)
+  // instead of calling out to the resource API — see localActions.ts.
+  kind?: 'local';
+  // Overrides the XAA scope requested for this action's ID-JAG/resource-token
+  // exchange (see xaa.ts) instead of the flow-wide XAA_SCOPE/THIRD_XAA_SCOPE
+  // default — e.g. requesting a narrower read scope for reads and a write
+  // scope only for the action that actually mutates data. Must be a scope
+  // registered on the resource app's Okta auth server, or the token exchange
+  // is rejected.
+  scope?: string;
 }
 
 /**
@@ -59,9 +69,45 @@ const ALLOWED_ACTIONS: Record<string, AllowedAction> = {
     description: 'Decode a base64 string server-side.',
     defaultParams: { value: 'aHR0cGJpbmdv' },
   },
+
+  // --- Marketing data — served in-process by marketingStore.ts via
+  // localActions.ts, not the resource API above. Read vs. write access is
+  // enforced by Okta via the scope requested below (api:access:read vs.
+  // api:access:write), not by any in-app role check.
+  'marketing.list': {
+    method: 'GET',
+    path: '/marketing/campaigns',
+    kind: 'local',
+    scope: 'api:access:read',
+    description: 'List all marketing campaigns.',
+  },
+  'marketing.get': {
+    method: 'GET',
+    path: '/marketing/campaigns/:id',
+    kind: 'local',
+    scope: 'api:access:read',
+    description: 'Get one marketing campaign by ID.',
+    defaultParams: { id: 'camp-1' },
+  },
+  'marketing.update': {
+    method: 'PATCH',
+    path: '/marketing/campaigns/:id',
+    kind: 'local',
+    scope: 'api:access:write',
+    description: 'Update a campaign’s budget and/or status.',
+    defaultParams: { id: 'camp-1', budget: '15000' },
+  },
+  'marketing.create': {
+    method: 'POST',
+    path: '/marketing/campaigns',
+    kind: 'local',
+    scope: 'api:access:write',
+    description: 'Create a new marketing campaign.',
+    defaultParams: { name: 'New Campaign', budget: '1000' },
+  },
 };
 
-export function evaluate(action: string): ResourceAction | null {
+export function evaluate(action: string): AllowedAction | null {
   return ALLOWED_ACTIONS[action] ?? null;
 }
 

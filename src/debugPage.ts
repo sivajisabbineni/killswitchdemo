@@ -18,6 +18,7 @@ interface DebugPageOptions {
   error?: string;
   stopped: StoppedState | null;
   chainedXaaConfigured: boolean;
+  chatAssistantConfigured: boolean;
 }
 
 type StepStatus = 'pending' | 'success' | 'error';
@@ -111,6 +112,37 @@ const STEPS: StepDef[] = [
 ];
 
 const STEP_BY_LABEL = new Map(STEPS.flatMap((s) => s.labels.map((label) => [label, s] as const)));
+
+// Steps that are genuinely a token exchange with Okta (login + ID-JAG +
+// resource-token redemption, both single-hop and chained). T4/T9 are
+// deliberately excluded — those are the Agent Action / campaign-data calls,
+// not Okta calls, so they must not count toward this timer.
+const OKTA_EXCHANGE_STEPS = [1, 2, 3, 5, 6, 7, 8];
+
+/**
+ * Sums the network duration of the latest call for each Okta-exchange step
+ * that has actually run. Only tracedFetch-recorded calls carry durationMs —
+ * local marketing.* actions (T4/T9 when kind: 'local') never set it, so they
+ * can never contribute even if a step number were added here by mistake.
+ */
+function computeOktaExchangeMs(): number | null {
+  let total = 0;
+  let any = false;
+  for (const step of STEPS) {
+    if (!OKTA_EXCHANGE_STEPS.includes(step.n)) continue;
+    const call = getLatestCallForStep(step);
+    if (call?.durationMs !== undefined) {
+      total += call.durationMs;
+      any = true;
+    }
+  }
+  return any ? total : null;
+}
+
+function formatOktaTimer(ms: number | null): string {
+  if (ms === null) return '⏱ Okta exchange: —';
+  return `⏱ Okta exchange: ${(ms / 1000).toFixed(2)}s`;
+}
 
 /**
  * Call + token labels belonging to T1 (login) — kept out of any "clear the
@@ -234,14 +266,15 @@ function buildStepCard(step: StepDef): string {
 
   if (!call) {
     return `<div class="step-card">
-      <div class="step-card-header status-${status}">
+      <button type="button" class="step-card-header status-${status}" data-step-toggle="${step.n}" data-expanded="false">
         <span class="status-icon">${statusIcon}</span>
         <div>
           <div class="step-card-title">T${step.n} — ${escapeHtml(step.title)}</div>
           <div class="step-card-subtitle">${escapeHtml(step.subtitle)}</div>
         </div>
-      </div>
-      <div class="step-card-body">
+        <span class="step-card-chevron">▾</span>
+      </button>
+      <div class="step-card-body" data-step-body="${step.n}">
         <p class="muted" style="margin:0;">Not called yet. ${escapeHtml(step.hint)}</p>
       </div>
     </div>`;
@@ -296,25 +329,28 @@ function buildStepCard(step: StepDef): string {
   const codeTab = `<pre class="code-dark">${escapeHtml(buildCurl(call))}</pre>`;
 
   return `<div class="step-card">
-    <div class="step-card-header status-${status}">
+    <button type="button" class="step-card-header status-${status}" data-step-toggle="${step.n}" data-expanded="false">
       <span class="status-icon">${statusIcon}</span>
       <div>
         <div class="step-card-title">T${step.n} — ${escapeHtml(step.title)}</div>
         <div class="step-card-subtitle">${escapeHtml(step.subtitle)}</div>
       </div>
       <div class="step-card-timestamp">${escapeHtml(call.timestamp)}</div>
-    </div>
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="request">Request</button>
-      <button class="tab-btn" data-tab="response">Response</button>
-      <button class="tab-btn" data-tab="token">Token</button>
-      <button class="tab-btn" data-tab="code">Code</button>
-    </div>
-    <div class="tab-panels">
-      <div class="tab-panel active" data-panel="request">${requestTab}</div>
-      <div class="tab-panel" data-panel="response">${responseTab}</div>
-      <div class="tab-panel" data-panel="token">${tokenTab}</div>
-      <div class="tab-panel" data-panel="code">${codeTab}</div>
+      <span class="step-card-chevron">▾</span>
+    </button>
+    <div class="step-card-body" data-step-body="${step.n}">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="request">Request</button>
+        <button class="tab-btn" data-tab="response">Response</button>
+        <button class="tab-btn" data-tab="token">Token</button>
+        <button class="tab-btn" data-tab="code">Code</button>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-panel active" data-panel="request">${requestTab}</div>
+        <div class="tab-panel" data-panel="response">${responseTab}</div>
+        <div class="tab-panel" data-panel="token">${tokenTab}</div>
+        <div class="tab-panel" data-panel="code">${codeTab}</div>
+      </div>
     </div>
   </div>`;
 }
@@ -323,57 +359,85 @@ function labelTitle(label: string): string {
   return STEP_BY_LABEL.get(label)?.title ?? EXTRA_LABEL_TITLES[label] ?? label;
 }
 
-function buildResourceSummary(c: CallLogEntry): string | undefined {
-  if ((c.label !== 'resource:api-call' && c.label !== 'resource:api-call-chained') || !c.responseBody) return undefined;
-  let path: string;
-  try {
-    path = new URL(c.url).pathname;
-  } catch {
-    return undefined;
+// Marketing (local) calls all share the generic "Agent Action" step title —
+// too vague for the chat feed, so name the bubble after the actual campaign
+// operation instead. Distinguished by HTTP method (localActions.ts uses GET
+// for list/get, POST for create, PATCH for update), not by label, since
+// list/get/create/update all share the same T4/T9 step.
+function bubbleTitle(c: CallLogEntry): string {
+  if (c.url.startsWith('local://marketing')) {
+    if (c.method === 'PATCH') return 'Campaign Update';
+    if (c.method === 'POST') return 'Campaign Create';
+    return 'Campaign Read';
   }
+  return labelTitle(c.label);
+}
+
+function tryPrettyJson(body: string): string {
   try {
-    if (path === '/ip') {
-      return `Resource server sees the agent's IP as ${JSON.parse(c.responseBody).origin}`;
-    }
-    if (path === '/uuid') {
-      return `Generated UUID: ${JSON.parse(c.responseBody).uuid}`;
-    }
-    if (path === '/user-agent') {
-      return `User-Agent sent: ${JSON.parse(c.responseBody)['user-agent']}`;
-    }
-    if (path === '/headers') {
-      const count = Object.keys(JSON.parse(c.responseBody).headers || {}).length;
-      return `Read back ${count} request header${count === 1 ? '' : 's'}`;
-    }
-    if (path === '/get' || path.startsWith('/anything/')) {
-      const j = JSON.parse(c.responseBody);
-      return `Resource echoed the call back (origin ${j.origin})`;
-    }
-    if (path.startsWith('/delay/')) {
-      return `Waited ~${path.split('/')[2]}s, then responded normally`;
-    }
-    if (path.startsWith('/base64/')) {
-      return `Decoded to: "${c.responseBody}"`;
-    }
+    return JSON.stringify(JSON.parse(body), null, 2);
   } catch {
-    return undefined;
+    return body;
   }
-  return undefined;
+}
+
+function truncateToken(token: string, max = 44): string {
+  return token.length > max ? `${token.slice(0, max)}…` : token;
+}
+
+/**
+ * Chat bubbles show the real substance of a call, not a paraphrase: the
+ * issued token(s) for login/XAA/ID-JAG steps (which all have
+ * tokenLabelsByCallLabel), or the raw JSON output for tool calls (T4/T9 —
+ * resource/marketing actions, which don't). On failure, show whatever
+ * detail is available instead, since there's no token/output to show.
+ */
+function buildBubbleContent(c: CallLogEntry, step: StepDef | undefined, ok: boolean): string {
+  if (!ok) {
+    const detail = c.error ?? (c.responseBody ? tryPrettyJson(c.responseBody) : undefined);
+    return detail ? `<pre class="code-dark" style="margin-top:6px; white-space:pre-wrap;">${escapeHtml(detail)}</pre>` : '';
+  }
+  const tokenLabels = step?.tokenLabelsByCallLabel?.[c.label];
+  if (tokenLabels && tokenLabels.length > 0) {
+    const tokenEntries = tokenLabels
+      .map((label) => getTokens().find((t) => t.label === label))
+      .filter((t): t is TokenEntry => t !== undefined);
+    if (tokenEntries.length > 0) {
+      return tokenEntries
+        .map(
+          (t) => `
+      <div class="field-label" style="margin-top:8px;">${escapeHtml(t.label.toUpperCase())}</div>
+      <pre class="code-dark" style="margin:4px 0 0;">${escapeHtml(truncateToken(t.token))}</pre>`,
+        )
+        .join('');
+    }
+  }
+  if (!c.responseBody) return '';
+  return `<pre class="code-dark" style="margin-top:6px;">${escapeHtml(tryPrettyJson(c.responseBody))}</pre>`;
 }
 
 function buildFeedHtml(): string {
-  const greeting = `<div class="bubble bubble-assistant">Hi! I'm the killswitch-agent test harness. Use the actions below to run allowed calls, test the XAA login, or trigger the killswitch — every hop shows up in the timeline on the right.</div>`;
-  const calls = getCalls().slice().reverse();
+  const greeting = `<div class="bubble bubble-assistant">Hi! I'm the Marketing Cloud test harness. Use the actions below to run allowed calls, test the XAA login, or trigger the killswitch — every hop shows up in the timeline on the right.</div>`;
+  // T1 (login) is deliberately kept in the underlying call log across every
+  // action (via clearHistoryExceptLabels(LOGIN_STEP_LABELS) in server.ts) so
+  // its accordion card stays populated — but that means it would otherwise
+  // resurface as a stale bubble in every request's chat feed. Filter it out
+  // here only; the accordion (buildStepCard/getLatestCallForStep) still
+  // reads the unfiltered call log and reflects T1's true state regardless.
+  const calls = getCalls()
+    .filter((c) => !LOGIN_STEP_LABELS.includes(c.label))
+    .slice()
+    .reverse();
   const bubbles = calls
     .map((c) => {
       const ok = !c.error && (c.status === undefined || c.status < 400);
       const badge = c.error ? 'network error' : c.status !== undefined ? String(c.status) : '';
       const step = STEP_BY_LABEL.get(c.label);
       const jumpAttr = step ? ` data-jump-step="${step.n}"` : '';
-      const summary = ok ? buildResourceSummary(c) : undefined;
+      const content = buildBubbleContent(c, step, ok);
       return `<div class="bubble bubble-assistant ${ok ? 'bubble-ok' : 'bubble-fail'}"${jumpAttr}>
-        <strong>${escapeHtml(labelTitle(c.label))}</strong> <span class="badge ${ok ? 'badge-ok' : 'badge-fail'}">${escapeHtml(badge)}</span>
-        ${summary ? `<div style="margin-top:4px;">${escapeHtml(summary)}</div>` : ''}
+        <strong>${escapeHtml(bubbleTitle(c))}</strong> <span class="badge ${ok ? 'badge-ok' : 'badge-fail'}">${escapeHtml(badge)}</span>
+        ${content}
         ${step ? `<span class="muted"> — click to view T${step.n}</span>` : ''}
         <div class="muted timestamp">${escapeHtml(c.timestamp)}</div>
       </div>`;
@@ -387,6 +451,7 @@ export interface DebugFragments {
   stepCards: Record<number, string>;
   feedHtml: string;
   stopped: StoppedState | null;
+  oktaExchangeMs: number | null;
 }
 
 export function renderDebugFragments(stopped: StoppedState | null): DebugFragments {
@@ -396,11 +461,11 @@ export function renderDebugFragments(stopped: StoppedState | null): DebugFragmen
     stepStatuses[step.n] = statusOf(getLatestCallForStep(step));
     stepCards[step.n] = buildStepCard(step);
   }
-  return { stepStatuses, stepCards, feedHtml: buildFeedHtml(), stopped };
+  return { stepStatuses, stepCards, feedHtml: buildFeedHtml(), stopped, oktaExchangeMs: computeOktaExchangeMs() };
 }
 
 export function renderDebugPage(opts: DebugPageOptions): string {
-  const { stepStatuses, stepCards, feedHtml } = renderDebugFragments(opts.stopped);
+  const { stepStatuses, stepCards, feedHtml, oktaExchangeMs } = renderDebugFragments(opts.stopped);
 
   const errorHtml = opts.error
     ? `<div class="banner banner-error" style="margin:12px;"><strong>Error:</strong> ${escapeHtml(opts.error)}</div>`
@@ -422,16 +487,16 @@ export function renderDebugPage(opts: DebugPageOptions): string {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>killswitch-agent debug</title>
+  <title>Marketing Cloud debug</title>
   <style>
     :root {
-      --bg: #f4f5f7;
+      --bg: #eef4fa;
       --card-bg: #ffffff;
-      --border: #e1e4e8;
+      --border: #cfe0f0;
       --text: #1a1f24;
       --muted: #6b7280;
-      --accent: #2563eb;
-      --accent-dark: #1d4ed8;
+      --accent: #004b93;
+      --accent-dark: #00396f;
       --success-bg: #eafaf0;
       --success-border: #34c85a;
       --success-text: #0a7d28;
@@ -441,97 +506,109 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       --error-bg: #fde7e9;
       --error-border: #e0455a;
       --error-text: #b00020;
-      --dark: #0f1420;
+      --dark: #001f45;
     }
     * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       margin: 0;
-      background: var(--bg);
+      min-height: 100vh;
+      background: linear-gradient(135deg, #001f45 0%, #004b93 55%, #0064b1 100%);
       color: var(--text);
       line-height: 1.5;
     }
     .app-shell {
       display: flex;
-      gap: 20px;
-      max-width: 1440px;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      max-width: 1000px;
       margin: 20px auto;
       padding: 0 16px 20px;
-      align-items: flex-start;
     }
     .chat-panel {
-      width: 360px;
+      width: 100%;
+      max-width: 720px;
       flex-shrink: 0;
       display: flex;
       flex-direction: column;
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 16px;
       overflow: hidden;
+      min-height: 780px;
+      box-shadow: 0 8px 24px rgba(0,31,69,0.08);
     }
-    .chat-header { padding: 16px 18px 12px; border-bottom: 1px solid var(--border); }
-    .chat-header h1 { font-size: 17px; margin: 0 0 2px; }
-    .chat-header .subtitle { color: var(--muted); font-size: 12.5px; margin: 0; }
+    .chat-header { padding: 20px 22px 14px; border-bottom: 1px solid var(--border); }
+    .chat-header h1 { font-size: 19px; margin: 0 0 2px; }
+    .chat-header .subtitle { color: var(--muted); font-size: 13px; margin: 0; }
     .flow-tag {
-      display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 600;
-      padding: 3px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca;
+      display: inline-block; margin-top: 8px; margin-right: 6px; font-size: 11.5px; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px; background: #eaf2fb; color: #004b93;
     }
-    .chat-toolbar { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; flex-wrap: wrap; }
-    .chat-feed { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; max-height: 480px; }
+    .timer-tag {
+      display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px; background: #eafaf0; color: #0a7d28;
+      font-family: ui-monospace, monospace;
+    }
+    .chat-toolbar { padding: 14px 22px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+    .toolbar-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .toolbar-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted); margin: 2px 0 0;
+    }
+    .chat-feed { flex: 1; overflow-y: auto; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; min-height: 380px; max-height: none; }
     .bubble {
       background: #eef1f5;
-      border-radius: 12px;
-      padding: 10px 13px;
-      font-size: 13px;
+      border-radius: 14px;
+      padding: 12px 16px;
+      font-size: 14px;
       max-width: 100%;
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
     }
     .bubble-assistant { align-self: flex-start; }
     .bubble-ok { background: var(--success-bg); }
     .bubble-fail { background: var(--error-bg); }
     .bubble-pending { background: #eceff1; color: var(--muted); }
     .bubble[data-jump-step] { cursor: pointer; }
-    .bubble[data-jump-step]:hover { filter: brightness(0.97); }
-    .chat-suggestions { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+    .bubble[data-jump-step]:hover { filter: brightness(0.97); transform: translateX(2px); box-shadow: 0 2px 8px rgba(0,31,69,0.08); }
+    .chat-suggestions { padding: 12px 22px; border-top: 1px solid var(--border); display: flex; gap: 8px; flex-wrap: wrap; }
     .pill {
       font-family: inherit;
       font-size: 12.5px;
       font-weight: 600;
-      padding: 6px 12px;
+      padding: 7px 14px;
       border-radius: 999px;
       border: 1px solid var(--border);
       background: #fff;
       cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+      box-shadow: 0 1px 2px rgba(0,31,69,0.05);
     }
-    .pill:hover { background: #f6f8fa; }
+    .pill:hover { background: #eaf2fb; border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 4px 10px rgba(0,31,69,0.12); }
+    .pill:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(0,31,69,0.08); }
+    .pill.pill-active { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
+    .pill.pill-active:hover { background: var(--accent-dark); }
     .pill-danger { border-color: var(--error-border); color: var(--error-text); }
-    .pill-danger:hover { background: var(--error-bg); }
-    .chat-input-row { display: flex; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--border); }
-    .chat-input-row input[type="text"] { flex: 1; }
-    .timeline-panel { flex: 1; min-width: 0; }
-    .stepper { display: flex; align-items: center; margin-bottom: 16px; }
-    .step-pill {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 8px 16px 8px 10px;
-      cursor: pointer;
-      font-family: inherit;
-      text-align: left;
+    .pill-danger:hover { background: var(--error-bg); border-color: var(--error-border); }
+    .chat-input-row { display: flex; gap: 10px; padding: 16px 22px 20px; border-top: 1px solid var(--border); }
+    .chat-input-row input[type="text"] {
+      flex: 1; font-size: 15px; padding: 12px 16px; border-radius: 10px;
+      transition: border-color 0.12s ease, box-shadow 0.12s ease;
     }
-    .step-pill.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
-    .step-pill + .step-pill { margin-left: 10px; }
-    .step-connector { flex: 1; height: 2px; background: var(--border); margin: 0 -2px; min-width: 12px; }
-    .step-dot { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0; }
-    .status-pending .step-dot { background: #9ca3af; }
-    .status-success .step-dot { background: var(--success-border); }
-    .status-error .step-dot { background: var(--error-border); }
-    .step-label { font-size: 12px; font-weight: 600; line-height: 1.2; }
-    .step-label small { color: var(--muted); font-weight: 500; display: block; font-size: 11px; }
+    .chat-input-row input[type="text"]:focus {
+      outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,75,147,0.12);
+    }
+    .chat-input-row .btn-primary { padding: 12px 22px; font-size: 15px; border-radius: 10px; }
+    .timeline-panel { width: 100%; max-width: 720px; }
+    .accordion { display: flex; flex-direction: column; gap: 10px; }
     .step-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-    .step-card-header { background: var(--dark); color: #fff; padding: 16px 18px; display: flex; align-items: center; gap: 12px; }
+    .step-card-header {
+      background: var(--dark); color: #fff; padding: 16px 18px; display: flex; align-items: center; gap: 12px;
+      cursor: pointer; font-family: inherit; border: none; width: 100%; text-align: left;
+      transition: filter 0.12s ease;
+    }
+    .step-card-header:hover { filter: brightness(1.15); }
     .step-card-header .status-icon {
       width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
       font-weight: 700; flex-shrink: 0; background: rgba(255,255,255,0.12);
@@ -541,7 +618,11 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     .step-card-title { font-weight: 700; font-size: 15px; }
     .step-card-subtitle { color: #9ca3af; font-size: 12.5px; }
     .step-card-timestamp { margin-left: auto; color: #9ca3af; font-size: 11.5px; }
-    .step-card-body { padding: 16px 18px; }
+    .step-card-chevron { margin-left: auto; color: #9ca3af; font-size: 12px; transition: transform 0.15s ease; flex-shrink: 0; }
+    .step-card-header[data-expanded="true"] .step-card-chevron { transform: rotate(180deg); }
+    .step-card-header[data-expanded="true"] .step-card-timestamp { margin-left: 0; }
+    .step-card-body { padding: 16px 18px; display: none; }
+    .step-card-body.expanded { display: block; }
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 18px; }
     .tab-btn {
       font-family: inherit; font-size: 13px; font-weight: 600; color: var(--muted);
@@ -558,7 +639,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     }
     .req-url { word-break: break-all; }
     .method-pill {
-      background: #4f46e5; color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700;
+      background: #e32934; color: #fff; padding: 3px 10px; border-radius: 6px; font-weight: 700;
       font-size: 11px; flex-shrink: 0;
     }
     .method-pill.pill-ok { background: var(--success-border); }
@@ -587,9 +668,12 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     button, .btn {
       font-family: inherit; font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 6px;
       border: 1px solid var(--border); background: #fff; cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
     }
-    .btn-primary { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
-    .btn-primary:hover { background: var(--accent-dark); }
+    button:hover, .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(0,31,69,0.1); }
+    button:active, .btn:active { transform: translateY(0); box-shadow: none; }
+    .btn-primary { background: #e32934; border-color: #c81e28; color: #fff; }
+    .btn-primary:hover { background: #c81e28; }
     .btn-secondary { background: #fff; }
     input[type="text"] { font-family: inherit; font-size: 13px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border); }
     a.plain { text-decoration: none; }
@@ -601,7 +685,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
   <div class="app-shell">
     <aside class="chat-panel">
       <div class="chat-header">
-        <h1>killswitch-agent</h1>
+        <h1>Marketing Cloud</h1>
         <p class="subtitle">Okta Cross App Access (XAA) test harness</p>
         ${
           opts.loginFlow
@@ -614,33 +698,43 @@ export function renderDebugPage(opts: DebugPageOptions): string {
               }</span>`
             : ''
         }
+        <span class="timer-tag" id="oktaTimerTag" title="Total network time across the login + XAA/ID-JAG token exchanges with Okta (T1, T2/T3, and T5–T8 when chained) — excludes T4/T9 (the campaign/resource action call itself), which never talks to Okta.">${formatOktaTimer(oktaExchangeMs)}</span>
       </div>
       <div class="chat-toolbar">
         ${
           opts.loggedIn
-            ? '<select id="subjectTokenType" class="pill" title="Which token to send as subject_token for the ID-JAG exchange">' +
-              '<option value="access_token">Use access_token</option>' +
-              '<option value="id_token">Use ID token</option>' +
-              '</select>' +
-              '<button type="button" class="pill" id="xaaLoginBtn">Test XAA login</button>' +
+            ? '<p class="toolbar-label">💬 Try these, or just type them</p>' +
+              '<div class="toolbar-row">' +
+              '<button type="button" class="pill" id="tokenTypePill" data-cmd="toggle-token" title="Type \'use ID token\' or \'use access_token\' to switch"></button>' +
+              '<button type="button" class="pill" data-cmd="test-xaa">▶ Start XAA flow</button>' +
               (opts.chainedXaaConfigured
-                ? '<button type="button" class="pill" id="chainedXaaLoginBtn" title="User → Agent 1 → Agent 2 → Resource">Test Chained XAA</button>' +
-                  '<label class="pill" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;" title="When checked, Agent Action calls authorize with Agent 2\'s resource access_token (T8) instead of the single-hop token (T3), and show up as T9">' +
-                  '<input type="checkbox" id="chainedActionToggle" style="margin:0;" /> Actions via Chained XAA</label>'
+                ? '<button type="button" class="pill" id="chainedXaaPill" data-cmd="test-chained-xaa" title="User → Agent 1 → Agent 2 → Resource">▶ Start Chained XAA flow</button>'
                 : '') +
+              '</div>' +
+              (opts.chainedXaaConfigured
+                ? '<div class="toolbar-row">' +
+                  '<button type="button" class="pill" id="chainedActionsPill" data-cmd="toggle-chained-actions" title="Type \'enable chained actions\' or \'disable chained actions\'"></button>' +
+                  '</div>'
+                : '') +
+              '<p class="toolbar-label">👤 Session</p>' +
+              '<div class="toolbar-row">' +
               (opts.loginFlow !== 'resource'
-                ? '<a class="plain" href="/login"><button type="button" class="pill">Switch to Resource app login</button></a>'
+                ? '<button type="button" class="pill" data-cmd="switch-resource-login">Switch to Resource app login</button>'
                 : '') +
               (opts.loginFlow !== 'agent'
-                ? '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Switch to Agent app login</button></a>'
+                ? '<button type="button" class="pill" data-cmd="switch-agent-login">Switch to Agent app login</button>'
                 : '') +
               (opts.loginFlow !== 'm2m'
-                ? '<a class="plain" href="/m2mlogin"><button type="button" class="pill">Switch to M2M login</button></a>'
+                ? '<button type="button" class="pill" data-cmd="switch-m2m-login">Switch to M2M login</button>'
                 : '') +
-              '<a class="plain" href="/logout"><button type="button" class="pill">Logout</button></a>'
-            : '<a class="plain" href="/login"><button type="button" class="pill">Log in via Resource app</button></a>' +
-              '<a class="plain" href="/agentapplogin"><button type="button" class="pill">Log in via Agent app</button></a>' +
-              '<a class="plain" href="/m2mlogin"><button type="button" class="pill">Log in via M2M login</button></a>'
+              '<button type="button" class="pill" data-cmd="logout">🚪 Logout</button>' +
+              '</div>'
+            : '<p class="toolbar-label">👤 Log in to start</p>' +
+              '<div class="toolbar-row">' +
+              '<button type="button" class="pill" data-cmd="switch-resource-login">Log in via Resource app</button>' +
+              '<button type="button" class="pill" data-cmd="switch-agent-login">Log in via Agent app</button>' +
+              '<button type="button" class="pill" data-cmd="switch-m2m-login">Log in via M2M login</button>' +
+              '</div>'
         }
       </div>
       <div class="chat-feed" id="chatFeed">${feedHtml}</div>
@@ -649,13 +743,12 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         <button type="button" class="pill pill-danger" id="rogueBtn">⚠ Trigger Rogue Action</button>
       </div>
       <form class="chat-input-row" id="chatForm">
-        <input type="text" id="chatInput" placeholder='resource.get or resource.item {"id":"42"}' />
-        <button type="submit" class="btn-primary">Send</button>
+        <input type="text" id="chatInput" placeholder='${opts.chatAssistantConfigured ? 'Ask for anything — "initialize the XAA flow", "use my ID token", "fetch item 42"…' : 'Try "start XAA flow", "use ID token", or resource.get'}' />
+        <button type="submit" class="btn-primary">➤ Send</button>
       </form>
     </aside>
     <main class="timeline-panel">
-      <div class="stepper" id="stepper"></div>
-      <div id="stepDetail"></div>
+      <div class="accordion" id="accordion"></div>
     </main>
   </div>
 
@@ -665,22 +758,26 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     var STEP_META = ${JSON.stringify(STEPS.map((s) => ({ n: s.n, title: s.title })))};
     var stepStatuses = ${JSON.stringify(stepStatuses)};
     var stepCards = ${JSON.stringify(stepCards)};
-    var currentStep = 1;
+    var expandedStep = null;
+    var subjectTokenType = 'access_token';
+    var chainedActionsEnabled = false;
+    var CHAT_ASSISTANT_CONFIGURED = ${JSON.stringify(opts.chatAssistantConfigured)};
 
-    function renderStepper() {
-      var html = STEP_META.map(function (s, i) {
-        var st = stepStatuses[s.n] || 'pending';
-        var pill = '<button type="button" class="step-pill status-' + st + (s.n === currentStep ? ' selected' : '') + '" data-step="' + s.n + '">' +
-          '<span class="step-dot">T' + s.n + '</span><span class="step-label">' + s.title + '</span></button>';
-        return i > 0 ? '<span class="step-connector"></span>' + pill : pill;
-      }).join('');
-      document.getElementById('stepper').innerHTML = html;
+    function renderModePills() {
+      var tokenPill = document.getElementById('tokenTypePill');
+      if (tokenPill) tokenPill.textContent = '🔑 Using ' + (subjectTokenType === 'id_token' ? 'ID token' : 'access_token');
+      var chainedPill = document.getElementById('chainedActionsPill');
+      if (chainedPill) {
+        chainedPill.textContent = (chainedActionsEnabled ? '☑' : '☐') + ' Actions via Chained XAA';
+        chainedPill.classList.toggle('pill-active', chainedActionsEnabled);
+      }
     }
 
     function wireTabs(container) {
       var btns = container.querySelectorAll('.tab-btn');
       for (var i = 0; i < btns.length; i++) {
         btns[i].addEventListener('click', function (e) {
+          e.stopPropagation();
           var tab = e.currentTarget.getAttribute('data-tab');
           var card = e.currentTarget.closest('.step-card');
           card.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.toggle('active', b === e.currentTarget); });
@@ -689,26 +786,46 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       }
     }
 
-    function renderStepDetail() {
-      var el = document.getElementById('stepDetail');
-      el.innerHTML = stepCards[currentStep] || '';
+    function applyExpandedState(container) {
+      container.querySelectorAll('[data-step-toggle]').forEach(function (header) {
+        var n = parseInt(header.getAttribute('data-step-toggle'), 10);
+        var isOpen = n === expandedStep;
+        header.setAttribute('data-expanded', isOpen ? 'true' : 'false');
+        var body = container.querySelector('[data-step-body="' + n + '"]');
+        if (body) body.classList.toggle('expanded', isOpen);
+      });
+    }
+
+    function renderAccordion() {
+      var el = document.getElementById('accordion');
+      el.innerHTML = STEP_META.map(function (s) { return stepCards[s.n] || ''; }).join('');
       wireTabs(el);
+      applyExpandedState(el);
     }
 
     function selectStep(n) {
-      currentStep = n;
-      renderStepper();
-      renderStepDetail();
+      expandedStep = expandedStep === n ? null : n;
+      applyExpandedState(document.getElementById('accordion'));
+      if (expandedStep === n) {
+        var header = document.querySelector('[data-step-toggle="' + n + '"]');
+        if (header) header.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     }
 
-    document.getElementById('stepper').addEventListener('click', function (e) {
-      var pill = e.target.closest('.step-pill');
-      if (pill) selectStep(parseInt(pill.getAttribute('data-step'), 10));
+    document.getElementById('accordion').addEventListener('click', function (e) {
+      var header = e.target.closest('[data-step-toggle]');
+      if (header) selectStep(parseInt(header.getAttribute('data-step-toggle'), 10));
     });
 
     document.getElementById('chatFeed').addEventListener('click', function (e) {
       var bubble = e.target.closest('[data-jump-step]');
-      if (bubble) selectStep(parseInt(bubble.getAttribute('data-jump-step'), 10));
+      if (bubble) {
+        var n = parseInt(bubble.getAttribute('data-jump-step'), 10);
+        expandedStep = n;
+        applyExpandedState(document.getElementById('accordion'));
+        var header = document.querySelector('[data-step-toggle="' + n + '"]');
+        if (header) header.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     });
 
     function addPendingBubble(text) {
@@ -720,6 +837,12 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       feed.scrollTop = feed.scrollHeight;
     }
 
+    function renderOktaTimer(ms) {
+      var tag = document.getElementById('oktaTimerTag');
+      if (!tag) return;
+      tag.textContent = ms === null || ms === undefined ? '⏱ Okta exchange: —' : '⏱ Okta exchange: ' + (ms / 1000).toFixed(2) + 's';
+    }
+
     async function refreshFragments() {
       try {
         const res = await fetch('/debug/fragments?key=' + encodeURIComponent(ADMIN_KEY));
@@ -727,8 +850,8 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         const data = await res.json();
         stepStatuses = data.stepStatuses;
         stepCards = data.stepCards;
-        renderStepper();
-        renderStepDetail();
+        renderAccordion();
+        renderOktaTimer(data.oktaExchangeMs);
         document.getElementById('chatFeed').innerHTML = data.feedHtml;
         document.getElementById('chatFeed').scrollTop = document.getElementById('chatFeed').scrollHeight;
         document.getElementById('stoppedBanner').style.display = data.stopped ? '' : 'none';
@@ -739,52 +862,43 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       } catch (e) {}
     }
 
-    var xaaLoginBtn = document.getElementById('xaaLoginBtn');
-    if (xaaLoginBtn) {
-      xaaLoginBtn.addEventListener('click', async function () {
-        var subjectTokenType = document.getElementById('subjectTokenType').value;
-        addPendingBubble('Running ID-JAG exchange using ' + subjectTokenType + '...');
-        try {
-          await fetch('/xaa/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subjectTokenType }),
-          });
-        } catch (e) {}
-        await refreshFragments();
-      });
+    async function runTestXaaLogin() {
+      addPendingBubble('Running ID-JAG exchange using ' + subjectTokenType + '...');
+      try {
+        await fetch('/xaa/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subjectTokenType }),
+        });
+      } catch (e) {}
+      await refreshFragments();
     }
 
-    var chainedXaaLoginBtn = document.getElementById('chainedXaaLoginBtn');
-    if (chainedXaaLoginBtn) {
-      chainedXaaLoginBtn.addEventListener('click', async function () {
-        var subjectTokenType = document.getElementById('subjectTokenType').value;
-        addPendingBubble('Running chained XAA (Agent 1 → Agent 2) using ' + subjectTokenType + '...');
-        var ok = false;
-        try {
-          var res = await fetch('/xaa/chained-login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subjectTokenType }),
-          });
-          ok = res.ok;
-        } catch (e) {}
-        if (ok) {
-          // T5–T8 succeeded — finish the chain by calling T9 (Agent Action,
-          // Chained) with Agent 2's resulting resource access_token, same as
-          // clicking an action pill in chained mode. If the exchange above
-          // failed, skip this: T9 should stay "not called yet", not show a
-          // stale or unrelated result.
-          await postAgentAction('resource.get', undefined, 'chained');
-        } else {
-          await refreshFragments();
-        }
-      });
+    async function runTestChainedXaaLogin() {
+      addPendingBubble('Running chained XAA (Agent 1 → Agent 2) using ' + subjectTokenType + '...');
+      var ok = false;
+      try {
+        var res = await fetch('/xaa/chained-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subjectTokenType }),
+        });
+        ok = res.ok;
+      } catch (e) {}
+      if (ok) {
+        // T5–T8 succeeded — finish the chain by calling T9 (Agent Action,
+        // Chained) with Agent 2's resulting resource access_token, same as
+        // clicking an action pill in chained mode. If the exchange above
+        // failed, skip this: T9 should stay "not called yet", not show a
+        // stale or unrelated result.
+        await postAgentAction('resource.get', undefined, 'chained');
+      } else {
+        await refreshFragments();
+      }
     }
 
     async function postAgentAction(action, params, forceXaaMode) {
-      var chainedToggle = document.getElementById('chainedActionToggle');
-      var xaaMode = forceXaaMode || (chainedToggle && chainedToggle.checked ? 'chained' : undefined);
+      var xaaMode = forceXaaMode || (chainedActionsEnabled ? 'chained' : undefined);
       addPendingBubble('Sending "' + action + '"' + (xaaMode ? ' via Chained XAA' : '') + '...');
       try {
         await fetch('/agent/act', {
@@ -821,10 +935,98 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       postAgentAction('resource.delete_all', undefined);
     });
 
-    document.getElementById('chatForm').addEventListener('submit', function (e) {
-      e.preventDefault();
-      var raw = document.getElementById('chatInput').value.trim();
-      if (!raw) return;
+    // Toolbar quick-reply pills post the same commands a typed phrase would
+    // resolve to, so clicking and typing are two paths into one place.
+    function runCommand(cmd) {
+      if (cmd === 'test-xaa') return runTestXaaLogin();
+      if (cmd === 'test-chained-xaa') return runTestChainedXaaLogin();
+      if (cmd === 'switch-resource-login') { window.location.href = '/login'; return; }
+      if (cmd === 'switch-agent-login') { window.location.href = '/agentapplogin'; return; }
+      if (cmd === 'switch-m2m-login') { window.location.href = '/m2mlogin'; return; }
+      if (cmd === 'logout') { window.location.href = '/logout'; return; }
+      if (cmd === 'toggle-token') {
+        subjectTokenType = subjectTokenType === 'id_token' ? 'access_token' : 'id_token';
+        renderModePills();
+        addPendingBubble('Using ' + subjectTokenType + ' as the subject_token from now on.');
+        setTimeout(refreshFragments, 10);
+        return;
+      }
+      if (cmd === 'toggle-chained-actions') {
+        chainedActionsEnabled = !chainedActionsEnabled;
+        renderModePills();
+        addPendingBubble((chainedActionsEnabled ? 'Enabled' : 'Disabled') + ' Chained XAA for agent actions.');
+        setTimeout(refreshFragments, 10);
+        return;
+      }
+    }
+
+    document.querySelectorAll('.chat-toolbar .pill[data-cmd]').forEach(function (btn) {
+      btn.addEventListener('click', function () { runCommand(btn.getAttribute('data-cmd')); });
+    });
+    renderModePills();
+
+    // Fallback path when no LLM is configured (no ANTHROPIC_API_KEY): a small
+    // set of hand-written patterns so the chat still recognizes a few obvious
+    // phrasings rather than only literal action names.
+    function matchCommandFallback(text) {
+      var t = text.toLowerCase().trim();
+      var startVerb = /(start|run|test|initiat|initiali[sz]e|kick ?off|begin|trigger)/;
+      if (startVerb.test(t) && /chained/.test(t) && /xaa/.test(t)) return 'test-chained-xaa';
+      if (startVerb.test(t) && /xaa/.test(t)) return 'test-xaa';
+      if (/id.?token/.test(t) && /(use|switch)/.test(t)) return 'toggle-token';
+      if (/access.?token/.test(t) && /(use|switch)/.test(t)) return 'toggle-token';
+      if (/chained.*action/.test(t) && /(enable|on|turn on)/.test(t)) return chainedActionsEnabled ? null : 'toggle-chained-actions';
+      if (/chained.*action/.test(t) && /(disable|off|turn off)/.test(t)) return chainedActionsEnabled ? 'toggle-chained-actions' : null;
+      if (/resource app/.test(t) && /(switch|log ?in|login)/.test(t)) return 'switch-resource-login';
+      if (/agent app/.test(t) && /(switch|log ?in|login)/.test(t)) return 'switch-agent-login';
+      if (/m2m/.test(t) && /(switch|log ?in|login)/.test(t)) return 'switch-m2m-login';
+      if (/^log ?out$/.test(t)) return 'logout';
+      return null;
+    }
+
+    // Lets phrases like "show me campaigns" or "update campaign camp-2 budget
+    // to 20000, set it active" resolve to marketing.list/get/update with
+    // parsed params, without requiring the literal action name + JSON the
+    // plain fallback otherwise expects. Only used when no LLM is configured.
+    function extractCampaignId(t) {
+      var m = t.match(/\\bcamp[a-z]*[\\s-]*(\\d+)\\b/);
+      if (m) return 'camp-' + m[1];
+      var m2 = t.match(/\\bid\\s*[:=]?\\s*(camp-\\d+)\\b/);
+      return m2 ? m2[1] : null;
+    }
+
+    function matchMarketingAction(raw) {
+      var t = raw.toLowerCase();
+      if (!/campa[gi]/.test(t)) return null;
+      var id = extractCampaignId(t);
+      if (/(create|add|new)/.test(t)) {
+        var params = {};
+        var nameMatch = raw.match(/["“]([^"”]+)["”]/) || raw.match(/named\\s+([a-z0-9 ]+?)(?:,|\\.|$)/i);
+        params.name = nameMatch ? nameMatch[1].trim() : 'New Campaign';
+        var budgetMatch = t.match(/budget[^0-9]*([0-9][0-9,]*)/);
+        if (budgetMatch) params.budget = budgetMatch[1].replace(/,/g, '');
+        var statusMatch = t.match(/\\b(draft|active|paused)\\b/);
+        if (statusMatch) params.status = statusMatch[1];
+        return { action: 'marketing.create', params: params };
+      }
+      if (/(update|change|set|edit)/.test(t)) {
+        var params = { id: id || 'camp-1' };
+        var budgetMatch = t.match(/budget[^0-9]*([0-9][0-9,]*)/);
+        if (budgetMatch) params.budget = budgetMatch[1].replace(/,/g, '');
+        var statusMatch = t.match(/\\b(draft|active|paused)\\b/);
+        if (statusMatch) params.status = statusMatch[1];
+        return { action: 'marketing.update', params: params };
+      }
+      if (id) return { action: 'marketing.get', params: { id: id } };
+      if (/(show|list|view|get|see|display|what)/.test(t)) return { action: 'marketing.list', params: {} };
+      return null;
+    }
+
+    function handleFallback(raw) {
+      var cmd = matchCommandFallback(raw);
+      if (cmd) { runCommand(cmd); return; }
+      var marketingMatch = matchMarketingAction(raw);
+      if (marketingMatch) { postAgentAction(marketingMatch.action, marketingMatch.params); return; }
       var braceIdx = raw.indexOf('{');
       var action = (braceIdx === -1 ? raw : raw.slice(0, braceIdx)).trim();
       var paramsRaw = braceIdx === -1 ? '' : raw.slice(braceIdx).trim();
@@ -833,7 +1035,6 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         // the killswitch, even with an unrecognized action typed in.
         addPendingBubble('⚠ "' + action + '" is not an allowed action, so this input won\\'t send it. Use "Trigger Rogue Action" to test that on purpose.');
         setTimeout(refreshFragments, 10);
-        document.getElementById('chatInput').value = '';
         return;
       }
       var params;
@@ -843,12 +1044,54 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         } catch (err) {
           addPendingBubble('❌ Params must be valid JSON: ' + err);
           setTimeout(refreshFragments, 10);
-          document.getElementById('chatInput').value = '';
           return;
         }
       }
-      document.getElementById('chatInput').value = '';
       postAgentAction(action, params);
+    }
+
+    // Sends the raw message to the server, which asks Claude to classify it
+    // against the same command set the toolbar pills use, so free-form
+    // phrasing like "fetch item 42" or "trigger a rogue action" resolves
+    // without hand-written pattern matching. Falls back to matchCommandFallback
+    // when no ANTHROPIC_API_KEY is configured server-side.
+    async function handleChatMessage(raw) {
+      if (!CHAT_ASSISTANT_CONFIGURED) {
+        handleFallback(raw);
+        return;
+      }
+      addPendingBubble('Thinking...');
+      var decision;
+      try {
+        var res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: raw, subjectTokenType: subjectTokenType, chainedActionsEnabled: chainedActionsEnabled }),
+        });
+        if (!res.ok) throw new Error('chat request failed');
+        decision = await res.json();
+      } catch (e) {
+        await refreshFragments();
+        handleFallback(raw);
+        return;
+      }
+      await refreshFragments();
+      if (decision.reply) addPendingBubble(decision.reply);
+      if (decision.command === 'run-action') {
+        postAgentAction(decision.action, decision.params);
+      } else if (decision.command && decision.command !== 'reply') {
+        runCommand(decision.command);
+      } else {
+        setTimeout(refreshFragments, 10);
+      }
+    }
+
+    document.getElementById('chatForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var raw = document.getElementById('chatInput').value.trim();
+      if (!raw) return;
+      document.getElementById('chatInput').value = '';
+      handleChatMessage(raw);
     });
 
     var resetBtn = document.getElementById('resetBtn');
@@ -863,8 +1106,7 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       });
     }
 
-    renderStepper();
-    renderStepDetail();
+    renderAccordion();
     document.getElementById('chatFeed').scrollTop = document.getElementById('chatFeed').scrollHeight;
   </script>
 </body>

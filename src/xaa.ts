@@ -155,8 +155,13 @@ async function runXaaExchange(
 export async function testXaaLogin(
   subjectToken: string,
   subjectTokenType: SubjectTokenType = 'access_token',
+  // Per-action scope override (see AllowedAction.scope in policy.ts) — lets a
+  // read action request api:access:read and a write action request
+  // api:access:write instead of always requesting the flow-wide XAA_SCOPE.
+  scopeOverride?: string,
 ): Promise<string> {
-  const { accessToken } = await runXaaExchange(subjectToken, subjectTokenType);
+  const opts = scopeOverride ? { ...FIRST_HOP, scope: scopeOverride } : FIRST_HOP;
+  const { accessToken } = await runXaaExchange(subjectToken, subjectTokenType, opts);
   return accessToken;
 }
 
@@ -240,10 +245,18 @@ function buildChainedHopB(): XaaHopOptions {
 export async function testChainedXaaLogin(
   subjectToken: string,
   subjectTokenType: SubjectTokenType = 'access_token',
+  // Per-action scope override for hop B only — hop B is the hop that actually
+  // invokes the downstream resource on the agent's behalf (see
+  // buildChainedHopB), analogous to the single-hop override on testXaaLogin.
+  scopeOverride?: string,
 ): Promise<{ firstHopAccessToken: string; secondHopAccessToken: string }> {
   const hopA = buildChainedHopA();
   const hopB = buildChainedHopB();
   const { accessToken: firstHopAccessToken } = await runXaaExchange(subjectToken, subjectTokenType, hopA);
-  const { accessToken: secondHopAccessToken } = await runXaaExchange(firstHopAccessToken, 'access_token', hopB);
+  const { accessToken: secondHopAccessToken } = await runXaaExchange(
+    firstHopAccessToken,
+    'access_token',
+    scopeOverride ? { ...hopB, scope: scopeOverride } : hopB,
+  );
   return { firstHopAccessToken, secondHopAccessToken };
 }

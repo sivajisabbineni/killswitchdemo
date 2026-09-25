@@ -23,11 +23,13 @@ export async function tracedFetch(label: string, url: string, init: RequestInit 
         ? init.body.toString()
         : undefined;
 
+  const startedAt = performance.now();
   let res: Response;
   try {
     res = await fetch(url, init);
   } catch (err) {
-    recordCall({ label, method, url, requestHeaders, requestBody, error: (err as Error).message });
+    const durationMs = performance.now() - startedAt;
+    recordCall({ label, method, url, requestHeaders, requestBody, error: (err as Error).message, durationMs });
     throw err;
   }
 
@@ -35,7 +37,8 @@ export async function tracedFetch(label: string, url: string, init: RequestInit 
     .clone()
     .text()
     .catch(() => '<unreadable body>');
+  const durationMs = performance.now() - startedAt;
   const responseHeaders = Object.fromEntries(res.headers.entries());
-  recordCall({ label, method, url, requestHeaders, requestBody, status: res.status, responseHeaders, responseBody });
+  recordCall({ label, method, url, requestHeaders, requestBody, status: res.status, responseHeaders, responseBody, durationMs });
   return res;
 }

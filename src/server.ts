@@ -18,6 +18,8 @@ import { renderLandingPage } from './landingPage';
 import { derivePublicJwk } from './publicKeyInfo';
 import { getAgentStoppedState } from './agentState';
 import { clearHistory, clearHistoryExceptLabels } from './debugLog';
+import { interpretChatMessage, isChatAssistantConfigured } from './chatAssistant';
+import { runLocalAction } from './localActions';
 
 const app = express();
 // Render (and most PaaS hosts) terminate TLS at a proxy and forward plain HTTP
@@ -51,8 +53,21 @@ app.get('/', (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
+  // RP-initiated logout (OIDC end_session): also ends the user's session at
+  // Okta, not just this app's local session — otherwise logging back in
+  // silently re-authenticates via Okta's still-live SSO session instead of
+  // prompting for credentials again. Only applicable when there's an ID
+  // token to hint with; the M2M flow never has one (client_credentials has
+  // no human user/session at Okta to end), so it just clears locally.
+  const idToken = req.session.userIdToken;
   req.session.destroy(() => {
-    res.redirect('/');
+    if (!idToken) {
+      return res.redirect('/');
+    }
+    const endSessionUrl = new URL(`${config.oktaOrgUrl}/oauth2/${config.loginAuthServerId}/v1/logout`);
+    endSessionUrl.searchParams.set('id_token_hint', idToken);
+    endSessionUrl.searchParams.set('post_logout_redirect_uri', config.postLogoutRedirectUri);
+    res.redirect(endSessionUrl.toString());
   });
 });
 
@@ -125,6 +140,7 @@ app.get('/debug', (req, res) => {
       error: typeof req.query.error === 'string' ? req.query.error : undefined,
       stopped: getAgentStoppedState(),
       chainedXaaConfigured: isChainedXaaConfigured(),
+      chatAssistantConfigured: isChatAssistantConfigured(),
     }),
   );
 });
@@ -144,6 +160,28 @@ app.get('/xaa/public-key', (req, res) => {
     res.json(derivePublicJwk());
   } catch (err) {
     res.status(500).json({ error: 'key_derivation_failed', detail: (err as Error).message });
+  }
+});
+
+app.post('/chat', async (req, res) => {
+  if (!isChatAssistantConfigured()) {
+    return res.status(503).json({ error: 'chat_assistant_not_configured' });
+  }
+  const { message, subjectTokenType, chainedActionsEnabled } = req.body ?? {};
+  if (typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'missing_message' });
+  }
+  try {
+    const decision = await interpretChatMessage(message, {
+      loggedIn: Boolean(req.session.userAccessToken),
+      loginFlow: req.session.loginFlow,
+      subjectTokenType: subjectTokenType === 'id_token' ? 'id_token' : 'access_token',
+      chainedActionsEnabled: Boolean(chainedActionsEnabled),
+      chainedXaaConfigured: isChainedXaaConfigured(),
+    });
+    res.json(decision);
+  } catch (err) {
+    res.status(502).json({ error: 'chat_failed', detail: (err as Error).message });
   }
 });
 
@@ -250,9 +288,12 @@ app.post('/agent/act', async (req, res) => {
     // XAA/Chained XAA/tool-call run.
     clearHistoryExceptLabels(LOGIN_STEP_LABELS);
     const accessToken = isChained
-      ? (await testChainedXaaLogin(subjectToken, subjectTokenType)).secondHopAccessToken
-      : await testXaaLogin(subjectToken, subjectTokenType);
-    const result = await callResourceApi(accessToken, matched, params, resourceCallLabel);
+      ? (await testChainedXaaLogin(subjectToken, subjectTokenType, matched.scope)).secondHopAccessToken
+      : await testXaaLogin(subjectToken, subjectTokenType, matched.scope);
+    const result =
+      matched.kind === 'local'
+        ? await runLocalAction(resourceCallLabel, matched, action, params ?? {}, accessToken)
+        : await callResourceApi(accessToken, matched, params, resourceCallLabel);
     res.json({ result });
   } catch (err) {
     res.status(502).json({ error: 'resource_call_failed', detail: (err as Error).message });
@@ -283,5 +324,5 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 app.listen(config.port, () => {
-  console.log(`killswitch-agent listening on port ${config.port}`);
+  console.log(`Marketing Cloud listening on port ${config.port}`);
 });

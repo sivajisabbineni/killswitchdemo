@@ -1,4 +1,4 @@
-# killswitch-agent
+# Marketing Cloud
 
 A test agent that authenticates via Okta Cross App Access (XAA) and calls an
 external killswitch webhook when it attempts an action outside its allowed
