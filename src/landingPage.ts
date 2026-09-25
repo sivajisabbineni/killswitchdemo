@@ -49,7 +49,7 @@ export function renderLandingPage(opts: LandingPageOptions): string {
 <body>
   <div class="card">
     <h1>Marketing Cloud</h1>
-    <p>Choose how the human user logs in before testing the Okta Cross App Access (XAA) flow.</p>
+    <p>Welcome to Marketing Cloud Agent Demo Application</p>
     ${opts.loggedIn ? `<div class="status">Currently logged in via <strong>${flowLabel}</strong></div>` : ''}
     <div class="options">
       <a class="plain" href="/login"><button class="btn-primary">Log in via Resource app</button></a>
