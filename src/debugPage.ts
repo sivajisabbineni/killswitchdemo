@@ -156,6 +156,12 @@ export const LOGIN_STEP_LABELS: string[] = [
   ...Object.values(STEPS[0].tokenLabelsByCallLabel ?? {}).flat(),
 ];
 
+// T2 ("Get ID-JAG") and T3 ("Resource Access Token") are intermediate XAA
+// hops — always shown in the T1-T9 accordion, but too noisy to also surface
+// as their own chat bubbles on every action. Filtered out of the feed only;
+// buildStepCard/getLatestCallForStep still read the unfiltered call log.
+const HIDDEN_FEED_LABELS: string[] = ['xaa:id-jag-request', 'xaa:resource-token-exchange'];
+
 function getLatestCallForStep(step: StepDef): CallLogEntry | undefined {
   return getCalls().find((c) => step.labels.includes(c.label));
 }
@@ -382,6 +388,61 @@ function tryPrettyJson(body: string): string {
   }
 }
 
+interface CampaignShape {
+  id: string;
+  name: string;
+  status: string;
+  budget: number;
+  channel: string;
+}
+
+function isCampaignShape(value: unknown): value is CampaignShape {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === 'string' && typeof v.name === 'string' && typeof v.status === 'string' && typeof v.budget === 'number';
+}
+
+function formatBudget(budget: number): string {
+  return budget.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+}
+
+function campaignCardHtml(c: CampaignShape): string {
+  return `<div class="campaign-card">
+    <div class="campaign-card-row">
+      <span class="campaign-name">${escapeHtml(c.name)}</span>
+      <span class="status-pill status-pill-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span>
+    </div>
+    <div class="campaign-card-meta">
+      <span>${escapeHtml(c.id)}</span>
+      <span>${escapeHtml(c.channel ?? 'Unassigned')}</span>
+      <span class="campaign-budget">${escapeHtml(formatBudget(c.budget))}</span>
+    </div>
+  </div>`;
+}
+
+/**
+ * Renders a marketing.* call's JSON response (a single campaign, or a list
+ * from marketing.list) as readable campaign cards instead of raw JSON — the
+ * shape check falls back to pretty-printed JSON for anything unexpected
+ * (e.g. an error body), so this never hides real error detail.
+ */
+function tryCampaignHtml(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0 || !parsed.every(isCampaignShape)) return undefined;
+    return `<div class="campaign-list">${parsed.map(campaignCardHtml).join('')}</div>`;
+  }
+  if (isCampaignShape(parsed)) {
+    return campaignCardHtml(parsed);
+  }
+  return undefined;
+}
+
 function truncateToken(token: string, max = 44): string {
   return token.length > max ? `${token.slice(0, max)}…` : token;
 }
@@ -414,6 +475,10 @@ function buildBubbleContent(c: CallLogEntry, step: StepDef | undefined, ok: bool
     }
   }
   if (!c.responseBody) return '';
+  if (c.url.startsWith('local://marketing')) {
+    const campaignHtml = tryCampaignHtml(c.responseBody);
+    if (campaignHtml) return campaignHtml;
+  }
   return `<pre class="code-dark" style="margin-top:6px;">${escapeHtml(tryPrettyJson(c.responseBody))}</pre>`;
 }
 
@@ -426,7 +491,7 @@ function buildFeedHtml(): string {
   // here only; the accordion (buildStepCard/getLatestCallForStep) still
   // reads the unfiltered call log and reflects T1's true state regardless.
   const calls = getCalls()
-    .filter((c) => !LOGIN_STEP_LABELS.includes(c.label))
+    .filter((c) => !LOGIN_STEP_LABELS.includes(c.label) && !HIDDEN_FEED_LABELS.includes(c.label))
     .slice()
     .reverse();
   const bubbles = calls
@@ -664,6 +729,23 @@ export function renderDebugPage(opts: DebugPageOptions): string {
     }
     .code-block { background: #f6f8fa; border: 1px solid var(--border); }
     .code-dark { background: var(--dark); color: #fbbf24; }
+    .campaign-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+    .campaign-card {
+      border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: #fff;
+    }
+    .campaign-card-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .campaign-name { font-weight: 600; font-size: 13.5px; }
+    .campaign-card-meta {
+      display: flex; align-items: center; gap: 10px; margin-top: 4px; font-size: 12px; color: var(--muted);
+    }
+    .campaign-budget { font-weight: 600; color: var(--accent); }
+    .status-pill {
+      display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
+      text-transform: capitalize;
+    }
+    .status-pill-active { background: var(--success-bg); color: var(--success-text); }
+    .status-pill-paused { background: var(--warn-bg); color: var(--warn-text); }
+    .status-pill-draft { background: #eef1f5; color: #3a4a5c; }
     .mini { margin: 8px 0; font-size: 12px; }
     .mini summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
     .mini summary::-webkit-details-marker { display: none; }
@@ -1009,6 +1091,19 @@ export function renderDebugPage(opts: DebugPageOptions): string {
       return m2 ? m2[1] : null;
     }
 
+    // Maps loose phrasing ("make it inactive", "deactivate", "pause",
+    // "turn it back on") to the store's actual status enum (draft/active/
+    // paused), since users don't say "paused" or "active" literally. Checked
+    // in this order so "inactive" (which contains "active" as a substring)
+    // is matched by the paused branch first, not misread as "active".
+    function matchCampaignStatus(t) {
+      if (/\\b(inactive|deactivat\\w*|pause[d]?|turn(ed)? off|stop(ped)?)\\b/.test(t)) return 'paused';
+      if (/\\b(activate\\w*|resume[d]?|turn(ed)? on|reactivat\\w*)\\b/.test(t)) return 'active';
+      if (/\\bactive\\b/.test(t)) return 'active';
+      if (/\\bdraft\\b/.test(t)) return 'draft';
+      return null;
+    }
+
     function matchMarketingAction(raw) {
       var t = raw.toLowerCase();
       if (!/campa[gi]/.test(t)) return null;
@@ -1019,16 +1114,16 @@ export function renderDebugPage(opts: DebugPageOptions): string {
         params.name = nameMatch ? nameMatch[1].trim() : 'New Campaign';
         var budgetMatch = t.match(/budget[^0-9]*([0-9][0-9,]*)/);
         if (budgetMatch) params.budget = budgetMatch[1].replace(/,/g, '');
-        var statusMatch = t.match(/\\b(draft|active|paused)\\b/);
-        if (statusMatch) params.status = statusMatch[1];
+        var statusMatch = matchCampaignStatus(t);
+        if (statusMatch) params.status = statusMatch;
         return { action: 'marketing.create', params: params };
       }
-      if (/(update|change|set|edit)/.test(t)) {
+      if (/(update|change|set|edit|pause|deactivat|activat|resume|stop)/.test(t)) {
         var params = { id: id || 'camp-1' };
         var budgetMatch = t.match(/budget[^0-9]*([0-9][0-9,]*)/);
         if (budgetMatch) params.budget = budgetMatch[1].replace(/,/g, '');
-        var statusMatch = t.match(/\\b(draft|active|paused)\\b/);
-        if (statusMatch) params.status = statusMatch[1];
+        var statusMatch = matchCampaignStatus(t);
+        if (statusMatch) params.status = statusMatch;
         return { action: 'marketing.update', params: params };
       }
       if (id) return { action: 'marketing.get', params: { id: id } };
